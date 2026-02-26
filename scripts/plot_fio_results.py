@@ -111,12 +111,14 @@ def main():
         ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055221.log', '1024KB'),
         ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055425.log', '1536KB'),
         ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055607.log', '2048KB'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_064412.log', 'DRAM'),
     ]
 
     # Parse all test files
     all_data = {}
     for log_file, cache_size in test_files:
-        print(f"Parsing {cache_size} HMB cache results from {os.path.basename(log_file)}...")
+        label = f"{cache_size} HMB cache" if cache_size != 'DRAM' else 'DRAM (no HMB)'
+        print(f"Parsing {label} results from {os.path.basename(log_file)}...")
         data = parse_fio_log_improved(log_file)
         if data['qd']:
             all_data[cache_size] = data
@@ -125,18 +127,19 @@ def main():
             print(f"  Warning: No data found!")
 
     # Create figure with subplots
-    # Reduce figure width to 30% of original (original width 12 -> new width 3.6)
     fig, axes = plt.subplots(3, 1, figsize=(5, 10))
     fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold')
-    # Color palette for the four cache sizes
-    colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288"]
+    # Color palette for the cache sizes (last is DRAM)
+    colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0"]
+    cache_sizes = ['512KB', '1024KB', '1536KB', '2048KB', 'DRAM']
 
     # Plot 1: Bandwidth
     ax = axes[0]
-    for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
+    for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
-            ax.plot(data['qd'], data['bandwidth'], color=colors[idx], label=cache_size, linewidth=2)
+            style = '--' if cache_size == 'DRAM' else '-'
+            ax.plot(data['qd'], data['bandwidth'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
     ax.set_ylabel('Bandwidth (MiB/s)', fontsize=12)
     ax.set_xlabel('Queue Depth (QD)', fontsize=12)
     ax.set_title('Bandwidth vs Queue Depth', fontsize=13)
@@ -145,10 +148,11 @@ def main():
 
     # Plot 2: IOPS
     ax = axes[1]
-    for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
+    for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
-            ax.plot(data['qd'], [iops/1000 for iops in data['iops']], color=colors[idx], label=cache_size, linewidth=2)
+            style = '--' if cache_size == 'DRAM' else '-'
+            ax.plot(data['qd'], [iops/1000 for iops in data['iops']], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
     ax.set_ylabel('IOPS (K)', fontsize=12)
     ax.set_xlabel('Queue Depth (QD)', fontsize=12)
     ax.set_title('IOPS vs Queue Depth', fontsize=13)
@@ -157,10 +161,11 @@ def main():
 
     # Plot 3: Latency
     ax = axes[2]
-    for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
+    for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
-            ax.plot(data['qd'], data['latency'], color=colors[idx], label=cache_size, linewidth=2)
+            style = '--' if cache_size == 'DRAM' else '-'
+            ax.plot(data['qd'], data['latency'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
     ax.set_ylabel('Latency (μs)', fontsize=12)
     ax.set_xlabel('Queue Depth (QD)', fontsize=12)
     ax.set_title('Latency (avg) vs Queue Depth', fontsize=13)
@@ -178,10 +183,13 @@ def main():
     print("\n" + "="*80)
     print("Performance Summary:")
     print("="*80)
-    for cache_size in ['512KB', '1024KB', '1536KB', '2048KB']:
+    for cache_size in cache_sizes:
         if cache_size in all_data:
             data = all_data[cache_size]
-            print(f"\n{cache_size} HMB Cache:")
+            if cache_size == 'DRAM':
+                print(f"\nDRAM (no HMB):")
+            else:
+                print(f"\n{cache_size} HMB Cache:")
             print(f"  Max Bandwidth: {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
             print(f"  Max IOPS:      {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
             print(f"  Min Latency:   {min(data['latency']):.2f} μs (at QD={data['qd'][data['latency'].index(min(data['latency']))]})")

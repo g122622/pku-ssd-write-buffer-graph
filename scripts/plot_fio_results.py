@@ -112,7 +112,7 @@ def main():
         ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055425.log', '1536KB'),
         ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055607.log', '2048KB'),
     ]
-    
+
     # Parse all test files
     all_data = {}
     for log_file, cache_size in test_files:
@@ -123,14 +123,14 @@ def main():
             print(f"  Found {len(data['qd'])} QD test points")
         else:
             print(f"  Warning: No data found!")
-    
+
     # Create figure with subplots
     # Reduce figure width to 30% of original (original width 12 -> new width 3.6)
     fig, axes = plt.subplots(3, 1, figsize=(5, 10))
     fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold')
     # Color palette for the four cache sizes
-    colors = ['#003f5c', '#7a5195', '#ef5675', '#ffa600']
-    
+    colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288"]
+
     # Plot 1: Bandwidth
     ax = axes[0]
     for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
@@ -142,7 +142,7 @@ def main():
     ax.set_title('Bandwidth vs Queue Depth', fontsize=13)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
-    
+
     # Plot 2: IOPS
     ax = axes[1]
     for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
@@ -154,7 +154,7 @@ def main():
     ax.set_title('IOPS vs Queue Depth', fontsize=13)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
-    
+
     # Plot 3: Latency
     ax = axes[2]
     for idx, cache_size in enumerate(['512KB', '1024KB', '1536KB', '2048KB']):
@@ -166,14 +166,14 @@ def main():
     ax.set_title('Latency (avg) vs Queue Depth', fontsize=13)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
-    
+
     plt.tight_layout()
-    
+
     # Save the figure
     output_path = 'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\scripts\\fio_performance_plot.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\nPlot saved to: {output_path}")
-    
+
     # Print summary statistics
     print("\n" + "="*80)
     print("Performance Summary:")
@@ -185,7 +185,7 @@ def main():
             print(f"  Max Bandwidth: {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
             print(f"  Max IOPS:      {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
             print(f"  Min Latency:   {min(data['latency']):.2f} μs (at QD={data['qd'][data['latency'].index(min(data['latency']))]})")
-    
+
     plt.show()
 
 if __name__ == '__main__':

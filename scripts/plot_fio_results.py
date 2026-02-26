@@ -176,6 +176,8 @@ def main():
     # Create figure with subplots
     fig, axes = plt.subplots(5, 1, figsize=(5, 14))
     fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold')
+    # 副标题
+    # fig.text(0.5, 0.94, "fio-3.28 size=1G block_size=4K", ha="center", fontsize=12)
     # Color palette for the cache sizes (last is DRAM)
     colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0"]
     cache_sizes = ['512KB', '1024KB', '1536KB', '2048KB', 'DRAM']
@@ -207,7 +209,7 @@ def main():
     ax.legend(fontsize=10)
 
     # Plot 3: Min Latency
-    ax = axes[2]
+    ax = axes[3]
     for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
@@ -220,7 +222,7 @@ def main():
     ax.legend(fontsize=10)
 
     # Plot 4: Max Latency
-    ax = axes[3]
+    ax = axes[4]
     for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
@@ -233,7 +235,7 @@ def main():
     ax.legend(fontsize=10)
 
     # Plot 5: Avg Latency
-    ax = axes[4]
+    ax = axes[2]
     for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]

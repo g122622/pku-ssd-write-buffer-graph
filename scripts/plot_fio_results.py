@@ -10,6 +10,49 @@ import os
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+def extract_all_latency_metrics(section):
+    """
+    提取所有延迟指标并统一单位为微秒
+    """
+    # 提取clat行
+    clat_match = re.search(r'clat \(([^)]+)\):\s+min=([\d.]+)([kmun]*),\s+max=([\d.]+)([kmun]*),\s+avg=([\d.]+)([kmun]*),\s+stdev=([\d.]+)([kmun]*)', section)
+    if not clat_match:
+        return None
+    
+    unit = clat_match.group(1)  # 原始单位 (nsec, usec, msec等)
+    
+    metrics = {}
+    values = {
+        'min': (float(clat_match.group(2)), clat_match.group(3)),      # 值和后缀
+        'max': (float(clat_match.group(4)), clat_match.group(5)),
+        'avg': (float(clat_match.group(6)), clat_match.group(7)),
+        'stdev': (float(clat_match.group(8)), clat_match.group(9))
+    }
+    
+    for key, (value, suffix) in values.items():
+        # 处理后缀 (k, m, u, n等)
+        if suffix == 'k':
+            value *= 1000
+        elif suffix == 'm':
+            value *= 1000000
+        elif suffix == 'u':
+            value *= 1  # 微秒乘1，不变
+        elif suffix == 'n':
+            value /= 1000  # 纳秒转微秒
+        
+        # 根据原始单位转换为微秒
+        if unit in ['nsec', 'nsecs']:
+            value /= 1000.0
+        elif unit in ['msec', 'msecs']:
+            value *= 1000.0
+        elif unit in ['usec', 'usecs']:
+            pass  # 已经是微秒，不需要转换
+        # 对于其他单位，保持原样
+        
+        metrics[key] = value
+    
+    return metrics
+
 def parse_fio_log(log_file):
     """
     Parse FIO log file and extract QD, IOPS, bandwidth, and latency data.
@@ -70,7 +113,9 @@ def parse_fio_log_improved(log_file):
         'qd': [],
         'iops': [],
         'bandwidth': [],  # in MiB/s
-        'latency': [],    # avg latency in usec
+        'latency_min': [],    # min latency in usec
+        'latency_max': [],    # max latency in usec
+        'latency_avg': [],    # avg latency in usec
     }
     
     # Split by QD test sections
@@ -95,10 +140,12 @@ def parse_fio_log_improved(log_file):
             if bw_match:
                 data['bandwidth'].append(float(bw_match.group(1)))
             
-            # Extract average latency from clat (completion latency)
-            clat_match = re.search(r'clat \(.*?\): min=\d+(?:\.?\d+)?(?:k|m|u|n)?, max=\d+(?:\.?\d+)?(?:k|m|u|n)?, avg=([\d.]+)', section)
-            if clat_match:
-                data['latency'].append(float(clat_match.group(1)))
+            # Extract latency metrics using the new function
+            latency_metrics = extract_all_latency_metrics(section)
+            if latency_metrics:
+                data['latency_min'].append(latency_metrics.get('min', 0))
+                data['latency_max'].append(latency_metrics.get('max', 0))
+                data['latency_avg'].append(latency_metrics.get('avg', 0))
             
             data['qd'].append(qd)
     
@@ -127,7 +174,7 @@ def main():
             print(f"  Warning: No data found!")
 
     # Create figure with subplots
-    fig, axes = plt.subplots(3, 1, figsize=(5, 10))
+    fig, axes = plt.subplots(5, 1, figsize=(5, 14))
     fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold')
     # Color palette for the cache sizes (last is DRAM)
     colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0"]
@@ -159,16 +206,42 @@ def main():
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
 
-    # Plot 3: Latency
+    # Plot 3: Min Latency
     ax = axes[2]
     for idx, cache_size in enumerate(cache_sizes):
         if cache_size in all_data:
             data = all_data[cache_size]
             style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], data['latency'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
+            ax.plot(data['qd'], data['latency_min'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
     ax.set_ylabel('Latency (μs)', fontsize=12)
     ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('Latency (avg) vs Queue Depth', fontsize=13)
+    ax.set_title('Min Latency vs Queue Depth', fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+
+    # Plot 4: Max Latency
+    ax = axes[3]
+    for idx, cache_size in enumerate(cache_sizes):
+        if cache_size in all_data:
+            data = all_data[cache_size]
+            style = '--' if cache_size == 'DRAM' else '-'
+            ax.plot(data['qd'], data['latency_max'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
+    ax.set_ylabel('Latency (μs)', fontsize=12)
+    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
+    ax.set_title('Max Latency vs Queue Depth', fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+
+    # Plot 5: Avg Latency
+    ax = axes[4]
+    for idx, cache_size in enumerate(cache_sizes):
+        if cache_size in all_data:
+            data = all_data[cache_size]
+            style = '--' if cache_size == 'DRAM' else '-'
+            ax.plot(data['qd'], data['latency_avg'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
+    ax.set_ylabel('Latency (μs)', fontsize=12)
+    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
+    ax.set_title('Avg Latency vs Queue Depth', fontsize=13)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
 
@@ -190,9 +263,11 @@ def main():
                 print(f"\nDRAM (no HMB):")
             else:
                 print(f"\n{cache_size} HMB Cache:")
-            print(f"  Max Bandwidth: {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
-            print(f"  Max IOPS:      {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
-            print(f"  Min Latency:   {min(data['latency']):.2f} μs (at QD={data['qd'][data['latency'].index(min(data['latency']))]})")
+            print(f"  Max Bandwidth:      {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
+            print(f"  Max IOPS:           {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
+            print(f"  Min Latency:        {min(data['latency_min']):.2f} μs (at QD={data['qd'][data['latency_min'].index(min(data['latency_min']))]})")
+            print(f"  Max Latency:        {max(data['latency_max']):.2f} μs (at QD={data['qd'][data['latency_max'].index(max(data['latency_max']))]})")
+            print(f"  Avg Latency (min):  {min(data['latency_avg']):.2f} μs (at QD={data['qd'][data['latency_avg'].index(min(data['latency_avg']))]})")
 
     plt.show()
 

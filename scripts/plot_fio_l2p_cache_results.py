@@ -31,6 +31,24 @@ def parse_bw_to_mib(value_text, unit_text):
         return value * 1024.0
     return value
 
+
+def convert_latency_to_us(value, unit, suffix=''):
+    """Convert latency value to microseconds from fio unit/suffix."""
+    if suffix == 'k':
+        value *= 1000
+    elif suffix == 'm':
+        value *= 1000000
+    elif suffix == 'u':
+        value *= 1
+    elif suffix == 'n':
+        value /= 1000
+
+    if unit in ['nsec', 'nsecs']:
+        return value / 1000.0
+    if unit in ['msec', 'msecs']:
+        return value * 1000.0
+    return value
+
 def extract_all_latency_metrics(section):
     """
     提取所有延迟指标并统一单位为微秒
@@ -51,27 +69,33 @@ def extract_all_latency_metrics(section):
     }
     
     for key, (value, suffix) in values.items():
-        # 处理后缀 (k, m, u, n等)
-        if suffix == 'k':
-            value *= 1000
-        elif suffix == 'm':
-            value *= 1000000
-        elif suffix == 'u':
-            value *= 1  # 微秒乘1，不变
-        elif suffix == 'n':
-            value /= 1000  # 纳秒转微秒
-        
-        # 根据原始单位转换为微秒
-        if unit in ['nsec', 'nsecs']:
-            value /= 1000.0
-        elif unit in ['msec', 'msecs']:
-            value *= 1000.0
-        elif unit in ['usec', 'usecs']:
-            pass  # 已经是微秒，不需要转换
-        # 对于其他单位，保持原样
-        
-        metrics[key] = value
+        metrics[key] = convert_latency_to_us(value, unit, suffix)
     
+    return metrics
+
+
+def extract_latency_percentiles(section):
+    """提取 90th / 99th / 99.9th 延迟百分位并统一为微秒。"""
+    header = re.search(r'clat percentiles \(([^)]+)\):', section)
+    if not header:
+        return None
+
+    pct_unit = header.group(1)
+    metrics = {}
+    targets = {
+        'latency_p90': '90.00th',
+        'latency_p99': '99.00th',
+        'latency_p999': '99.90th',
+    }
+
+    for key, label in targets.items():
+        match = re.search(rf'{re.escape(label)}=\[\s*([\d.]+)([kmun]?)\]', section)
+        if not match:
+            return None
+        value = float(match.group(1))
+        suffix = match.group(2)
+        metrics[key] = convert_latency_to_us(value, pct_unit, suffix)
+
     return metrics
 
 def parse_fio_log(log_file):
@@ -138,6 +162,9 @@ def parse_fio_log_improved(log_file, op_type='read'):
         'latency_min': [],    # min latency in usec
         'latency_max': [],    # max latency in usec
         'latency_avg': [],    # avg latency in usec
+        'latency_p90': [],    # p90 latency in usec
+        'latency_p99': [],    # p99 latency in usec
+        'latency_p999': [],   # p99.9 latency in usec
     }
     
     # Split by QD test sections
@@ -153,8 +180,9 @@ def parse_fio_log_improved(log_file, op_type='read'):
             iops_match = re.search(rf'{op_type}: IOPS=([\d.]+k?)', section)
             bw_match = re.search(r'BW=([\d.]+)(KiB/s|MiB/s|GiB/s)', section)
             latency_metrics = extract_all_latency_metrics(section)
+            latency_percentiles = extract_latency_percentiles(section)
 
-            if not iops_match or not bw_match or not latency_metrics:
+            if not iops_match or not bw_match or not latency_metrics or not latency_percentiles:
                 continue
 
             iops_val = parse_iops(iops_match.group(1))
@@ -167,6 +195,9 @@ def parse_fio_log_improved(log_file, op_type='read'):
             data['latency_min'].append(latency_metrics.get('min', 0))
             data['latency_max'].append(latency_metrics.get('max', 0))
             data['latency_avg'].append(latency_metrics.get('avg', 0))
+            data['latency_p90'].append(latency_percentiles.get('latency_p90', 0))
+            data['latency_p99'].append(latency_percentiles.get('latency_p99', 0))
+            data['latency_p999'].append(latency_percentiles.get('latency_p999', 0))
             
             data['qd'].append(qd)
     
@@ -230,7 +261,7 @@ def main():
     write_data = parse_dataset(write_test_files, op_type='write')
 
     # Create figure with subplots
-    fig, axes = plt.subplots(5, 2, figsize=(12, 14))
+    fig, axes = plt.subplots(8, 2, figsize=(12, 22))
     fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold', y=0.985)
     fig.text(
         0.5,
@@ -266,6 +297,9 @@ def main():
     plot_metric(axes[2, 0], read_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randread: Avg Latency vs Queue Depth')
     plot_metric(axes[3, 0], read_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randread: Min Latency vs Queue Depth')
     plot_metric(axes[4, 0], read_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randread: Max Latency vs Queue Depth')
+    plot_metric(axes[5, 0], read_data, cache_sizes, colors, 'latency_p90', 'Latency (μs)', 'Randread: P90 Latency vs Queue Depth')
+    plot_metric(axes[6, 0], read_data, cache_sizes, colors, 'latency_p99', 'Latency (μs)', 'Randread: P99 Latency vs Queue Depth')
+    plot_metric(axes[7, 0], read_data, cache_sizes, colors, 'latency_p999', 'Latency (μs)', 'Randread: P99.9 Latency vs Queue Depth')
 
     # Right column: randwrite
     plot_metric(axes[0, 1], write_data, cache_sizes, colors, 'bandwidth', 'Bandwidth (MiB/s)', 'Randwrite: Bandwidth vs Queue Depth')
@@ -273,6 +307,9 @@ def main():
     plot_metric(axes[2, 1], write_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randwrite: Avg Latency vs Queue Depth')
     plot_metric(axes[3, 1], write_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randwrite: Min Latency vs Queue Depth')
     plot_metric(axes[4, 1], write_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randwrite: Max Latency vs Queue Depth')
+    plot_metric(axes[5, 1], write_data, cache_sizes, colors, 'latency_p90', 'Latency (μs)', 'Randwrite: P90 Latency vs Queue Depth')
+    plot_metric(axes[6, 1], write_data, cache_sizes, colors, 'latency_p99', 'Latency (μs)', 'Randwrite: P99 Latency vs Queue Depth')
+    plot_metric(axes[7, 1], write_data, cache_sizes, colors, 'latency_p999', 'Latency (μs)', 'Randwrite: P99.9 Latency vs Queue Depth')
 
     plt.tight_layout(rect=[0, 0, 1, 0.93])
 

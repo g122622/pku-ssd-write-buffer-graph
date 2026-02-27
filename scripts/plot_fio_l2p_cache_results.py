@@ -10,6 +10,27 @@ import os
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+
+def parse_iops(iops_text):
+    """Parse fio IOPS field, e.g. 98.6k / 1205."""
+    text = iops_text.strip()
+    if text.endswith('k'):
+        return float(text[:-1]) * 1000.0
+    return float(text)
+
+
+def parse_bw_to_mib(value_text, unit_text):
+    """Convert fio bandwidth to MiB/s."""
+    value = float(value_text)
+    unit = unit_text.strip()
+    if unit == 'KiB/s':
+        return value / 1024.0
+    if unit == 'MiB/s':
+        return value
+    if unit == 'GiB/s':
+        return value * 1024.0
+    return value
+
 def extract_all_latency_metrics(section):
     """
     提取所有延迟指标并统一单位为微秒
@@ -102,9 +123,10 @@ def parse_fio_log(log_file):
     
     return data
 
-def parse_fio_log_improved(log_file):
+def parse_fio_log_improved(log_file, op_type='read'):
     """
     Improved version - parse FIO log file more reliably.
+    op_type: 'read' or 'write'
     """
     with open(log_file, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -128,126 +150,131 @@ def parse_fio_log_improved(log_file):
             section = qd_sections[i + 1]
             
             # Extract IOPS
-            iops_match = re.search(r'read: IOPS=([\d.]+)k?', section)
-            if iops_match:
-                iops_val = float(iops_match.group(1))
-                if 'k' in iops_match.group(0):
-                    iops_val *= 1000
-                data['iops'].append(iops_val)
+            iops_match = re.search(rf'{op_type}: IOPS=([\d.]+k?)', section)
+            bw_match = re.search(r'BW=([\d.]+)(KiB/s|MiB/s|GiB/s)', section)
+            latency_metrics = extract_all_latency_metrics(section)
+
+            if not iops_match or not bw_match or not latency_metrics:
+                continue
+
+            iops_val = parse_iops(iops_match.group(1))
+            data['iops'].append(iops_val)
             
             # Extract Bandwidth
-            bw_match = re.search(r'BW=([\d.]+)MiB/s', section)
-            if bw_match:
-                data['bandwidth'].append(float(bw_match.group(1)))
+            data['bandwidth'].append(parse_bw_to_mib(bw_match.group(1), bw_match.group(2)))
             
             # Extract latency metrics using the new function
-            latency_metrics = extract_all_latency_metrics(section)
-            if latency_metrics:
-                data['latency_min'].append(latency_metrics.get('min', 0))
-                data['latency_max'].append(latency_metrics.get('max', 0))
-                data['latency_avg'].append(latency_metrics.get('avg', 0))
+            data['latency_min'].append(latency_metrics.get('min', 0))
+            data['latency_max'].append(latency_metrics.get('max', 0))
+            data['latency_avg'].append(latency_metrics.get('avg', 0))
             
             data['qd'].append(qd)
     
     return data
 
-def main():
-    # Define the test configurations
-    test_files = [
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055009.log', '512KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055221.log', '1024KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055425.log', '1536KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055607.log', '2048KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_064412.log', 'DRAM'),
-    ]
 
-    # Parse all test files
+def build_test_files(data_dir, cache_sizes):
+    """Build test file list by timestamp order, mapping to cache sizes."""
+    log_files = sorted(Path(data_dir).glob('fio_test_*.log'))
+    test_files = []
+    for idx, cache_size in enumerate(cache_sizes):
+        if idx < len(log_files):
+            test_files.append((str(log_files[idx]), cache_size))
+    return test_files
+
+
+def parse_dataset(test_files, op_type):
+    """Parse a list of fio log files into dataset dict."""
     all_data = {}
     for log_file, cache_size in test_files:
         label = f"{cache_size} HMB cache" if cache_size != 'DRAM' else 'DRAM (no HMB)'
-        print(f"Parsing {label} results from {os.path.basename(log_file)}...")
-        data = parse_fio_log_improved(log_file)
+        print(f"Parsing {op_type} {label} results from {os.path.basename(log_file)}...")
+        data = parse_fio_log_improved(log_file, op_type=op_type)
         if data['qd']:
             all_data[cache_size] = data
             print(f"  Found {len(data['qd'])} QD test points")
         else:
             print(f"  Warning: No data found!")
+    return all_data
+
+
+def plot_metric(ax, all_data, cache_sizes, colors, metric_key, ylabel, title):
+    """Plot one metric for all cache sizes on a given axis."""
+    for idx, cache_size in enumerate(cache_sizes):
+        if cache_size in all_data:
+            data = all_data[cache_size]
+            style = '--' if cache_size == 'DRAM' else '-'
+            y_data = data[metric_key]
+            if metric_key == 'iops':
+                y_data = [iops / 1000 for iops in y_data]
+            ax.plot(data['qd'], y_data, color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
+    ax.set_title(title, fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+
+def main():
+    cache_sizes = ['512KB', '1024KB', '1536KB', '2048KB', 'DRAM']
+    read_test_files = build_test_files(
+        'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G',
+        cache_sizes
+    )
+    write_test_files = build_test_files(
+        'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randwrite-4k-1G',
+        cache_sizes
+    )
+
+    # Parse read/write test files
+    read_data = parse_dataset(read_test_files, op_type='read')
+    write_data = parse_dataset(write_test_files, op_type='write')
 
     # Create figure with subplots
-    fig, axes = plt.subplots(5, 1, figsize=(5, 14))
-    fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold')
-    # 副标题
-    # fig.text(0.5, 0.94, "fio-3.28 size=1G block_size=4K", ha="center", fontsize=12)
+    fig, axes = plt.subplots(5, 2, figsize=(12, 14))
+    fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold', y=0.985)
+    fig.text(
+        0.5,
+        0.96,
+        "Ubuntu 22.04.5 LTS x86_64, Kernel: 5.15.0-170-generic",
+        ha="center",
+        va="top",
+        fontsize=10,
+    )
+    fig.text(
+        0.5,
+        0.945,
+        "fio-3.28, size=1G, block_size=4K",
+        ha="center",
+        va="top",
+        fontsize=10,
+    )
+    fig.text(
+        0.5,
+        0.93,
+        "CPU: Intel Core i7-14700KF@5.6GHz, RAM: 128GB",
+        ha="center",
+        va="top",
+        fontsize=10,
+    )
+
     # Color palette for the cache sizes (last is DRAM)
     colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0"]
-    cache_sizes = ['512KB', '1024KB', '1536KB', '2048KB', 'DRAM']
 
-    # Plot 1: Bandwidth
-    ax = axes[0]
-    for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], data['bandwidth'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel('Bandwidth (MiB/s)', fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('Bandwidth vs Queue Depth', fontsize=13)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
+    # Left column: randread
+    plot_metric(axes[0, 0], read_data, cache_sizes, colors, 'bandwidth', 'Bandwidth (MiB/s)', 'Randread: Bandwidth vs Queue Depth')
+    plot_metric(axes[1, 0], read_data, cache_sizes, colors, 'iops', 'IOPS (K)', 'Randread: IOPS vs Queue Depth')
+    plot_metric(axes[2, 0], read_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randread: Avg Latency vs Queue Depth')
+    plot_metric(axes[3, 0], read_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randread: Min Latency vs Queue Depth')
+    plot_metric(axes[4, 0], read_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randread: Max Latency vs Queue Depth')
 
-    # Plot 2: IOPS
-    ax = axes[1]
-    for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], [iops/1000 for iops in data['iops']], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel('IOPS (K)', fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('IOPS vs Queue Depth', fontsize=13)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
+    # Right column: randwrite
+    plot_metric(axes[0, 1], write_data, cache_sizes, colors, 'bandwidth', 'Bandwidth (MiB/s)', 'Randwrite: Bandwidth vs Queue Depth')
+    plot_metric(axes[1, 1], write_data, cache_sizes, colors, 'iops', 'IOPS (K)', 'Randwrite: IOPS vs Queue Depth')
+    plot_metric(axes[2, 1], write_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randwrite: Avg Latency vs Queue Depth')
+    plot_metric(axes[3, 1], write_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randwrite: Min Latency vs Queue Depth')
+    plot_metric(axes[4, 1], write_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randwrite: Max Latency vs Queue Depth')
 
-    # Plot 3: Min Latency
-    ax = axes[3]
-    for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], data['latency_min'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel('Latency (μs)', fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('Min Latency vs Queue Depth', fontsize=13)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
-
-    # Plot 4: Max Latency
-    ax = axes[4]
-    for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], data['latency_max'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel('Latency (μs)', fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('Max Latency vs Queue Depth', fontsize=13)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
-
-    # Plot 5: Avg Latency
-    ax = axes[2]
-    for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            ax.plot(data['qd'], data['latency_avg'], color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel('Latency (μs)', fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title('Avg Latency vs Queue Depth', fontsize=13)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
-
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
 
     # Save the figure
     output_path = 'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\scripts\\fio_performance_plot.png'
@@ -258,18 +285,20 @@ def main():
     print("\n" + "="*80)
     print("Performance Summary:")
     print("="*80)
-    for cache_size in cache_sizes:
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            if cache_size == 'DRAM':
-                print(f"\nDRAM (no HMB):")
-            else:
-                print(f"\n{cache_size} HMB Cache:")
-            print(f"  Max Bandwidth:      {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
-            print(f"  Max IOPS:           {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
-            print(f"  Min Latency:        {min(data['latency_min']):.2f} μs (at QD={data['qd'][data['latency_min'].index(min(data['latency_min']))]})")
-            print(f"  Max Latency:        {max(data['latency_max']):.2f} μs (at QD={data['qd'][data['latency_max'].index(max(data['latency_max']))]})")
-            print(f"  Avg Latency (min):  {min(data['latency_avg']):.2f} μs (at QD={data['qd'][data['latency_avg'].index(min(data['latency_avg']))]})")
+    for rw_label, dataset in [('Randread', read_data), ('Randwrite', write_data)]:
+        print(f"\n{rw_label}:")
+        for cache_size in cache_sizes:
+            if cache_size in dataset:
+                data = dataset[cache_size]
+                if cache_size == 'DRAM':
+                    print(f"\nDRAM (no HMB):")
+                else:
+                    print(f"\n{cache_size} HMB Cache:")
+                print(f"  Max Bandwidth:      {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
+                print(f"  Max IOPS:           {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
+                print(f"  Min Latency:        {min(data['latency_min']):.2f} μs (at QD={data['qd'][data['latency_min'].index(min(data['latency_min']))]})")
+                print(f"  Max Latency:        {max(data['latency_max']):.2f} μs (at QD={data['qd'][data['latency_max'].index(max(data['latency_max']))]})")
+                print(f"  Avg Latency (min):  {min(data['latency_avg']):.2f} μs (at QD={data['qd'][data['latency_avg'].index(min(data['latency_avg']))]})")
 
     plt.show()
 

@@ -154,11 +154,11 @@ def parse_fio_log_improved(log_file):
 def main():
     # Define the test configurations
     test_files = [
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055009.log', '512KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055221.log', '1024KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055425.log', '1536KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_055607.log', '2048KB'),
-        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache\\fio_test_20260226_064412.log', 'DRAM'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055009.log', '512KB'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055221.log', '1024KB'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055425.log', '1536KB'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_055607.log', '2048KB'),
+        ('d:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G\\fio_test_20260226_064412.log', 'DRAM'),
     ]
 
     # Parse all test files

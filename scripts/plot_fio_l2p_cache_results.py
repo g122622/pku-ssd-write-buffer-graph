@@ -274,7 +274,7 @@ def main():
     fig.text(
         0.5,
         0.945,
-        "fio-3.28, size=1G, block_size=4K",
+        "fio-3.28, ioengine=libaio, size=1G, block_size=4K",
         ha="center",
         va="top",
         fontsize=10,

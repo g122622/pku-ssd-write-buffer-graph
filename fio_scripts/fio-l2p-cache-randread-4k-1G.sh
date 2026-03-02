@@ -4,7 +4,7 @@ OFFSET="1G"
 SIZE="1G"
 
 # 创建结果目录（如果不存在）
-RESULTS_DIR=~/exp_results
+RESULTS_DIR=/mnt/d/MiscProjects/pku-ssd-write-buffer-graph/results/fio-l2p-cache-randread-4k-1G
 mkdir -p $RESULTS_DIR
 
 # 获取当前时间戳，用于文件名

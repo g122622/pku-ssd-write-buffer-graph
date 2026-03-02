@@ -10,6 +10,7 @@ mkdir -p $RESULTS_DIR
 # 获取当前时间戳，用于文件名
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="${RESULTS_DIR}/fio_test_${TIMESTAMP}.log"
+NUM_JOBS=1
 
 echo "=== 测试开始于 $(date) ===" | tee -a $LOG_FILE
 echo "=== 测试配置 ===" | tee -a $LOG_FILE
@@ -31,7 +32,7 @@ for qd in 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 ; do
     sudo fio --name=test_qd$qd --filename=$DEV --offset=$OFFSET --size=$SIZE \
         --direct=1 --rw=randwrite --bs=4k \
         --ioengine=libaio --iodepth=$qd \
-        --numjobs=1 --time_based --runtime=3 \
+        --numjobs=$NUM_JOBS --time_based --runtime=3 \
         --group_reporting | tee -a $LOG_FILE
     
     echo "" | tee -a $LOG_FILE

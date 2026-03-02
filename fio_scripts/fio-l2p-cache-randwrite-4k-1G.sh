@@ -10,7 +10,6 @@ mkdir -p $RESULTS_DIR
 # 获取当前时间戳，用于文件名
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="${RESULTS_DIR}/fio_test_${TIMESTAMP}.log"
-NUM_JOBS=1
 
 echo "=== 测试开始于 $(date) ===" | tee -a $LOG_FILE
 echo "=== 测试配置 ===" | tee -a $LOG_FILE
@@ -25,15 +24,22 @@ sudo fio --name=pre --filename=$DEV --offset=$OFFSET --size=$SIZE \
     --rw=write --bs=4k --direct=1 --ioengine=libaio --iodepth=64 \
     --group_reporting | tee -a $LOG_FILE
 
-echo "=== 开始 QD 扫描测试 ===" | tee -a $LOG_FILE
-for qd in 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 ; do
-    echo "--- Testing QD=$qd ---" | tee -a $LOG_FILE
+echo "=== 开始 NUM_JOBS 扫描测试 ===" | tee -a $LOG_FILE
+for NUM_JOBS in 1 2 4 8 16 32 64; do
+    echo "========== Testing NUM_JOBS=$NUM_JOBS ==========" | tee -a $LOG_FILE
     
-    sudo fio --name=test_qd$qd --filename=$DEV --offset=$OFFSET --size=$SIZE \
-        --direct=1 --rw=randwrite --bs=4k \
-        --ioengine=libaio --iodepth=$qd \
-        --numjobs=$NUM_JOBS --time_based --runtime=3 \
-        --group_reporting | tee -a $LOG_FILE
+    echo "=== 开始 QD 扫描测试 ===" | tee -a $LOG_FILE
+    for qd in 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 ; do
+        echo "--- Testing QD=$qd ---" | tee -a $LOG_FILE
+        
+        sudo fio --name=test_nj${NUM_JOBS}_qd$qd --filename=$DEV --offset=$OFFSET --size=$SIZE \
+            --direct=1 --rw=randwrite --bs=4k \
+            --ioengine=libaio --iodepth=$qd \
+            --numjobs=$NUM_JOBS --time_based --runtime=3 \
+            --group_reporting | tee -a $LOG_FILE
+        
+        echo "" | tee -a $LOG_FILE
+    done
     
     echo "" | tee -a $LOG_FILE
 done

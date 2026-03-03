@@ -244,7 +244,7 @@ def generate_metric_figure(
     colors: List[str],
     all_numjobs: List[int],
 ) -> None:
-    fig, axes = plt.subplots(len(all_numjobs), 2, figsize=(14, 3.2 * len(all_numjobs)), squeeze=False)
+    fig, axes = plt.subplots(len(all_numjobs), 2, figsize=(9, 3.2 * len(all_numjobs)), squeeze=False)
     fig.suptitle(fig_title, fontsize=16, fontweight="bold", y=0.995)
     fig.text(0.5, 0.975, "Data source: results/fio-l2p-cache-randread-4k-1G + randwrite-4k-1G", ha="center", va="top", fontsize=9)
     fig.text(0.5, 0.963, "fio-3.28, ioengine=libaio, size=1G, bs=4k, runtime=3s", ha="center", va="top", fontsize=9)

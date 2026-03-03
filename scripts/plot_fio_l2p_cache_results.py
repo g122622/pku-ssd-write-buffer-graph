@@ -1,343 +1,473 @@
 #!/usr/bin/env python3
 """
-FIO L2P Cache Results Plotter
-This script parses FIO test results and creates visualization plots
-showing performance metrics (bandwidth, IOPS, latency) across different HMB cache sizes.
+FIO L2P Cache Results Plotter (updated for NUM_JOBS × QD sweep)
+
+更新点：
+1) 支持新的测试结构：每个 cache size 下做 NUM_JOBS 扫描，再做 QD 扫描。
+2) 数据源切换到仓库内 results/ 目录。
+3) 自动从日志文件名识别 cache size（例如: L2Size512KB），不再依赖硬编码映射。
+4) 绘图改为“每个 NUM_JOBS 一个子图”，横轴 QD，分别输出多种指标图。
 """
 
+from __future__ import annotations
+
 import re
-import os
-import matplotlib.pyplot as plt
+import csv
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import matplotlib.pyplot as plt
 
 
-def parse_iops(iops_text):
-    """Parse fio IOPS field, e.g. 98.6k / 1205."""
+def parse_iops(iops_text: str) -> float:
     text = iops_text.strip()
-    if text.endswith('k'):
+    if text.endswith("k"):
         return float(text[:-1]) * 1000.0
     return float(text)
 
 
-def parse_bw_to_mib(value_text, unit_text):
-    """Convert fio bandwidth to MiB/s."""
+def parse_bw_to_mib(value_text: str, unit_text: str) -> float:
     value = float(value_text)
     unit = unit_text.strip()
-    if unit == 'KiB/s':
+    if unit == "KiB/s":
         return value / 1024.0
-    if unit == 'MiB/s':
+    if unit == "MiB/s":
         return value
-    if unit == 'GiB/s':
+    if unit == "GiB/s":
         return value * 1024.0
     return value
 
 
-def convert_latency_to_us(value, unit, suffix=''):
-    """Convert latency value to microseconds from fio unit/suffix."""
-    if suffix == 'k':
+def convert_latency_to_us(value: float, unit: str, suffix: str = "") -> float:
+    if suffix == "k":
         value *= 1000
-    elif suffix == 'm':
+    elif suffix == "m":
         value *= 1000000
-    elif suffix == 'u':
+    elif suffix == "u":
         value *= 1
-    elif suffix == 'n':
+    elif suffix == "n":
         value /= 1000
 
-    if unit in ['nsec', 'nsecs']:
+    if unit in ["nsec", "nsecs"]:
         return value / 1000.0
-    if unit in ['msec', 'msecs']:
+    if unit in ["msec", "msecs"]:
         return value * 1000.0
     return value
 
-def extract_all_latency_metrics(section):
-    """
-    提取所有延迟指标并统一单位为微秒
-    """
-    # 提取clat行
-    clat_match = re.search(r'clat \(([^)]+)\):\s+min=([\d.]+)([kmun]*),\s+max=([\d.]+)([kmun]*),\s+avg=([\d.]+)([kmun]*),\s+stdev=([\d.]+)([kmun]*)', section)
+
+def extract_all_latency_metrics(section: str) -> Optional[Dict[str, float]]:
+    clat_match = re.search(
+        r"clat \(([^)]+)\):\s+min=([\d.]+)([kmun]*),\s+max=([\d.]+)([kmun]*),\s+avg=([\d.]+)([kmun]*),\s+stdev=([\d.]+)([kmun]*)",
+        section,
+    )
     if not clat_match:
         return None
-    
-    unit = clat_match.group(1)  # 原始单位 (nsec, usec, msec等)
-    
-    metrics = {}
+
+    unit = clat_match.group(1)
     values = {
-        'min': (float(clat_match.group(2)), clat_match.group(3)),      # 值和后缀
-        'max': (float(clat_match.group(4)), clat_match.group(5)),
-        'avg': (float(clat_match.group(6)), clat_match.group(7)),
-        'stdev': (float(clat_match.group(8)), clat_match.group(9))
+        "min": (float(clat_match.group(2)), clat_match.group(3)),
+        "max": (float(clat_match.group(4)), clat_match.group(5)),
+        "avg": (float(clat_match.group(6)), clat_match.group(7)),
+        "stdev": (float(clat_match.group(8)), clat_match.group(9)),
     }
-    
-    for key, (value, suffix) in values.items():
-        metrics[key] = convert_latency_to_us(value, unit, suffix)
-    
+
+    metrics: Dict[str, float] = {}
+    for key, (val, suffix) in values.items():
+        metrics[key] = convert_latency_to_us(val, unit, suffix)
     return metrics
 
 
-def extract_latency_percentiles(section):
-    """提取 90th / 99th / 99.9th 延迟百分位并统一为微秒。"""
-    header = re.search(r'clat percentiles \(([^)]+)\):', section)
+def extract_latency_percentiles(section: str) -> Optional[Dict[str, float]]:
+    header = re.search(r"clat percentiles \(([^)]+)\):", section)
     if not header:
         return None
 
     pct_unit = header.group(1)
-    metrics = {}
     targets = {
-        'latency_p90': '90.00th',
-        'latency_p99': '99.00th',
-        'latency_p999': '99.90th',
+        "latency_p90": "90.00th",
+        "latency_p99": "99.00th",
+        "latency_p999": "99.90th",
     }
 
+    metrics: Dict[str, float] = {}
     for key, label in targets.items():
-        match = re.search(rf'{re.escape(label)}=\[\s*([\d.]+)([kmun]?)\]', section)
+        match = re.search(rf"{re.escape(label)}=\[\s*([\d.]+)([kmun]?)\]", section)
         if not match:
             return None
         value = float(match.group(1))
         suffix = match.group(2)
         metrics[key] = convert_latency_to_us(value, pct_unit, suffix)
-
     return metrics
 
-def parse_fio_log(log_file):
-    """
-    Parse FIO log file and extract QD, IOPS, bandwidth, and latency data.
-    Returns a dict with the extracted metrics.
-    """
-    with open(log_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    data = {
-        'qd': [],
-        'iops': [],
-        'bandwidth': [],  # in MiB/s
-        'latency': [],    # avg latency in usec
-    }
-    
-    # Find all QD test sections
-    qd_pattern = r'--- Testing QD=(\d+) ---\n.*?read: IOPS=([\d.]+)k?, BW=([\d.]+)MiB/s.*?\n\s+slat.*?\n\s+clat.*?avg=(\d+(?:\.\d+)?)'
-    
-    matches = re.findall(qd_pattern, content, re.DOTALL)
-    
-    for match in matches:
-        qd = int(match[0])
-        iops_str = match[1]
-        
-        # Parse IOPS (handle 'k' suffix like "92.7k")
-        if 'k' in iops_str or ',' in content[content.find(f'QD={qd}'):content.find(f'QD={qd}') + 500]:
-            # Try to find IOPS in the format "IOPS=XXXXX"
-            iops_match = re.search(
-                r'--- Testing QD=' + str(qd) + r' ---.*?read: IOPS=([\d.]+)k?',
-                content,
-                re.DOTALL
-            )
-            if iops_match:
-                iops_val = float(iops_match.group(1))
-                if 'k' in iops_match.group(0).split('\n')[1]:
-                    iops_val *= 1000
-        else:
-            iops_val = float(iops_str) * 1000 if '.' in iops_str else float(iops_str)
-        
-        bandwidth = float(match[2])
-        latency = float(match[3])
-        
-        data['qd'].append(qd)
-        data['iops'].append(iops_val)
-        data['bandwidth'].append(bandwidth)
-        data['latency'].append(latency)
-    
-    return data
 
-def parse_fio_log_improved(log_file, op_type='read'):
-    """
-    Improved version - parse FIO log file more reliably.
-    op_type: 'read' or 'write'
-    """
-    with open(log_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    data = {
-        'qd': [],
-        'iops': [],
-        'bandwidth': [],  # in MiB/s
-        'latency_min': [],    # min latency in usec
-        'latency_max': [],    # max latency in usec
-        'latency_avg': [],    # avg latency in usec
-        'latency_p90': [],    # p90 latency in usec
-        'latency_p99': [],    # p99 latency in usec
-        'latency_p999': [],   # p99.9 latency in usec
-    }
-    
-    # Split by QD test sections
-    qd_sections = re.split(r'--- Testing QD=(\d+) ---', content)
-    
-    # Process pairs of (qd_number, section_content)
-    for i in range(1, len(qd_sections), 2):
-        if i + 1 < len(qd_sections):
+def extract_cache_size_from_filename(log_path: Path) -> str:
+    name = log_path.name
+    m = re.search(r"L2Size([^-_.]+)", name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    if "dram" in name.lower():
+        return "DRAM"
+    # fallback: 兼容旧命名
+    return log_path.stem
+
+
+def cache_sort_key(label: str) -> Tuple[int, str]:
+    if label == "DRAM":
+        return (10**12, label)
+    m = re.match(r"(\d+)(KB|MB|GB)$", label, re.IGNORECASE)
+    if not m:
+        return (10**11, label)
+    value = int(m.group(1))
+    unit = m.group(2).upper()
+    scale = {"KB": 1, "MB": 1024, "GB": 1024 * 1024}[unit]
+    return (value * scale, label)
+
+
+def latest_logs_by_cache(data_dir: Path) -> Dict[str, Path]:
+    """同一 cache size 若有多份日志，仅保留文件名按字典序最大的（通常是最新时间戳）。"""
+    best: Dict[str, Path] = {}
+    for p in sorted(data_dir.glob("fio_test_*.log")):
+        cache = extract_cache_size_from_filename(p)
+        if cache not in best or p.name > best[cache].name:
+            best[cache] = p
+    return best
+
+
+def parse_fio_log_with_numjobs(log_file: Path, op_type: str = "read") -> Dict[str, List[dict]]:
+    content = log_file.read_text(encoding="utf-8", errors="ignore")
+    points: List[dict] = []
+
+    nj_iter = list(re.finditer(r"^========== Testing NUM_JOBS=(\d+) ==========$", content, re.MULTILINE))
+    for idx, nj_match in enumerate(nj_iter):
+        num_jobs = int(nj_match.group(1))
+        start = nj_match.end()
+        end = nj_iter[idx + 1].start() if idx + 1 < len(nj_iter) else len(content)
+        nj_block = content[start:end]
+
+        qd_sections = re.split(r"--- Testing QD=(\d+) ---", nj_block)
+        for i in range(1, len(qd_sections), 2):
+            if i + 1 >= len(qd_sections):
+                continue
             qd = int(qd_sections[i])
             section = qd_sections[i + 1]
-            
-            # Extract IOPS
-            iops_match = re.search(rf'{op_type}: IOPS=([\d.]+k?)', section)
-            bw_match = re.search(r'BW=([\d.]+)(KiB/s|MiB/s|GiB/s)', section)
+
+            iops_match = re.search(rf"{op_type}: IOPS=([\d.]+k?)", section)
+            bw_match = re.search(r"BW=([\d.]+)(KiB/s|MiB/s|GiB/s)", section)
             latency_metrics = extract_all_latency_metrics(section)
             latency_percentiles = extract_latency_percentiles(section)
 
             if not iops_match or not bw_match or not latency_metrics or not latency_percentiles:
                 continue
 
-            iops_val = parse_iops(iops_match.group(1))
-            data['iops'].append(iops_val)
-            
-            # Extract Bandwidth
-            data['bandwidth'].append(parse_bw_to_mib(bw_match.group(1), bw_match.group(2)))
-            
-            # Extract latency metrics using the new function
-            data['latency_min'].append(latency_metrics.get('min', 0))
-            data['latency_max'].append(latency_metrics.get('max', 0))
-            data['latency_avg'].append(latency_metrics.get('avg', 0))
-            data['latency_p90'].append(latency_percentiles.get('latency_p90', 0))
-            data['latency_p99'].append(latency_percentiles.get('latency_p99', 0))
-            data['latency_p999'].append(latency_percentiles.get('latency_p999', 0))
-            
-            data['qd'].append(qd)
-    
-    return data
+            points.append(
+                {
+                    "num_jobs": num_jobs,
+                    "qd": qd,
+                    "iops": parse_iops(iops_match.group(1)),
+                    "bandwidth": parse_bw_to_mib(bw_match.group(1), bw_match.group(2)),
+                    "latency_min": latency_metrics["min"],
+                    "latency_max": latency_metrics["max"],
+                    "latency_avg": latency_metrics["avg"],
+                    "latency_p90": latency_percentiles["latency_p90"],
+                    "latency_p99": latency_percentiles["latency_p99"],
+                    "latency_p999": latency_percentiles["latency_p999"],
+                }
+            )
+
+    return {"points": points}
 
 
-def build_test_files(data_dir, cache_sizes):
-    """Build test file list by timestamp order, mapping to cache sizes."""
-    log_files = sorted(Path(data_dir).glob('fio_test_*.log'))
-    test_files = []
-    for idx, cache_size in enumerate(cache_sizes):
-        if idx < len(log_files):
-            test_files.append((str(log_files[idx]), cache_size))
-    return test_files
-
-
-def parse_dataset(test_files, op_type):
-    """Parse a list of fio log files into dataset dict."""
-    all_data = {}
-    for log_file, cache_size in test_files:
-        label = f"{cache_size} HMB cache" if cache_size != 'DRAM' else 'DRAM (no HMB)'
-        print(f"Parsing {op_type} {label} results from {os.path.basename(log_file)}...")
-        data = parse_fio_log_improved(log_file, op_type=op_type)
-        if data['qd']:
+def parse_dataset(data_dir: Path, op_type: str) -> Dict[str, Dict[str, List[dict]]]:
+    all_data: Dict[str, Dict[str, List[dict]]] = {}
+    for cache_size, log_file in sorted(latest_logs_by_cache(data_dir).items(), key=lambda x: cache_sort_key(x[0])):
+        print(f"Parsing {op_type} {cache_size}: {log_file.name}")
+        data = parse_fio_log_with_numjobs(log_file, op_type=op_type)
+        if data["points"]:
             all_data[cache_size] = data
-            print(f"  Found {len(data['qd'])} QD test points")
+            print(f"  Found {len(data['points'])} points")
         else:
-            print(f"  Warning: No data found!")
+            print("  Warning: no valid points found")
     return all_data
 
 
-def plot_metric(ax, all_data, cache_sizes, colors, metric_key, ylabel, title):
-    """Plot one metric for all cache sizes on a given axis."""
+def collect_numjobs(all_data: Dict[str, Dict[str, List[dict]]]) -> List[int]:
+    numjobs = set()
+    for cache_data in all_data.values():
+        for p in cache_data["points"]:
+            numjobs.add(p["num_jobs"])
+    return sorted(numjobs)
+
+
+def extract_qd_metric_for_numjobs(points: List[dict], target_numjobs: int, metric_key: str) -> Tuple[List[int], List[float]]:
+    subset = [p for p in points if p["num_jobs"] == target_numjobs]
+    subset.sort(key=lambda x: x["qd"])
+    qd = [p["qd"] for p in subset]
+    values = [p[metric_key] for p in subset]
+    if metric_key == "iops":
+        values = [v / 1000.0 for v in values]
+    return qd, values
+
+
+def plot_numjobs_panel(
+    ax,
+    all_data: Dict[str, Dict[str, List[dict]]],
+    cache_sizes: List[str],
+    colors: List[str],
+    target_numjobs: int,
+    metric_key: str,
+    ylabel: str,
+    title: str,
+) -> None:
     for idx, cache_size in enumerate(cache_sizes):
-        if cache_size in all_data:
-            data = all_data[cache_size]
-            style = '--' if cache_size == 'DRAM' else '-'
-            y_data = data[metric_key]
-            if metric_key == 'iops':
-                y_data = [iops / 1000 for iops in y_data]
-            ax.plot(data['qd'], y_data, color=colors[idx], label=cache_size, linewidth=2, linestyle=style)
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_xlabel('Queue Depth (QD)', fontsize=12)
-    ax.set_title(title, fontsize=13)
+        if cache_size not in all_data:
+            continue
+        qd, y = extract_qd_metric_for_numjobs(all_data[cache_size]["points"], target_numjobs, metric_key)
+        if not qd:
+            continue
+        style = "--" if cache_size == "DRAM" else "-"
+        ax.plot(qd, y, color=colors[idx % len(colors)], label=cache_size, linewidth=2, linestyle=style)
+
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_xlabel("Queue Depth (QD)", fontsize=10)
+    ax.set_title(title, fontsize=11)
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10)
 
-def main():
-    cache_sizes = ['512KB', '1024KB', '1536KB', '2048KB', 'DRAM']
-    read_test_files = build_test_files(
-        'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randread-4k-1G',
-        cache_sizes
+
+def generate_metric_figure(
+    metric_key: str,
+    ylabel: str,
+    fig_title: str,
+    output_path: Path,
+    read_data: Dict[str, Dict[str, List[dict]]],
+    write_data: Dict[str, Dict[str, List[dict]]],
+    cache_sizes: List[str],
+    colors: List[str],
+    all_numjobs: List[int],
+) -> None:
+    fig, axes = plt.subplots(len(all_numjobs), 2, figsize=(14, 3.2 * len(all_numjobs)), squeeze=False)
+    fig.suptitle(fig_title, fontsize=16, fontweight="bold", y=0.995)
+    fig.text(0.5, 0.975, "Data source: results/fio-l2p-cache-randread-4k-1G + randwrite-4k-1G", ha="center", va="top", fontsize=9)
+    fig.text(0.5, 0.963, "fio-3.28, ioengine=libaio, size=1G, bs=4k, runtime=3s", ha="center", va="top", fontsize=9)
+    fig.text(0.5, 0.951, "CPU: Intel Core i7-14700KF@5.6GHz, RAM: 128GB", ha="center", va="top", fontsize=9)
+
+    for row, nj in enumerate(all_numjobs):
+        plot_numjobs_panel(
+            axes[row, 0],
+            read_data,
+            cache_sizes,
+            colors,
+            nj,
+            metric_key,
+            ylabel,
+            f"Randread: NUM_JOBS={nj}",
+        )
+        plot_numjobs_panel(
+            axes[row, 1],
+            write_data,
+            cache_sizes,
+            colors,
+            nj,
+            metric_key,
+            ylabel,
+            f"Randwrite: NUM_JOBS={nj}",
+        )
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            ncol=min(6, len(labels)),
+            fontsize=9,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.942),
+        )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {output_path}")
+
+
+def build_clean_plot_rows(
+    metric_key: str,
+    read_data: Dict[str, Dict[str, List[dict]]],
+    write_data: Dict[str, Dict[str, List[dict]]],
+    cache_sizes: List[str],
+    all_numjobs: List[int],
+) -> List[dict]:
+    """
+    Build cleaned rows used by plotting:
+    - keep only rows that can actually be drawn (matching metric/numjobs/cache)
+    - normalize iops to K (same as figure)
+    - deduplicate by (rw, num_jobs, cache_size, qd)
+    - sort by rw, num_jobs, cache_size, qd
+    """
+    rows: List[dict] = []
+
+    def collect_rows(rw_label: str, dataset: Dict[str, Dict[str, List[dict]]]) -> None:
+        for num_jobs in all_numjobs:
+            for cache_size in cache_sizes:
+                if cache_size not in dataset:
+                    continue
+                qd_vals, y_vals = extract_qd_metric_for_numjobs(
+                    dataset[cache_size]["points"],
+                    num_jobs,
+                    metric_key,
+                )
+                for qd, y in zip(qd_vals, y_vals):
+                    if y is None:
+                        continue
+                    rows.append(
+                        {
+                            "rw": rw_label,
+                            "num_jobs": int(num_jobs),
+                            "cache_size": cache_size,
+                            "qd": int(qd),
+                            "value": float(y),
+                        }
+                    )
+
+    collect_rows("randread", read_data)
+    collect_rows("randwrite", write_data)
+
+    dedup: Dict[Tuple[str, int, str, int], dict] = {}
+    for r in rows:
+        key = (r["rw"], r["num_jobs"], r["cache_size"], r["qd"])
+        dedup[key] = r
+
+    cleaned = list(dedup.values())
+    cleaned.sort(key=lambda r: (r["rw"], r["num_jobs"], cache_sort_key(r["cache_size"]), r["qd"]))
+    return cleaned
+
+
+def save_metric_csv(
+    csv_path: Path,
+    metric_key: str,
+    metric_unit: str,
+    read_data: Dict[str, Dict[str, List[dict]]],
+    write_data: Dict[str, Dict[str, List[dict]]],
+    cache_sizes: List[str],
+    all_numjobs: List[int],
+) -> None:
+    rows = build_clean_plot_rows(
+        metric_key=metric_key,
+        read_data=read_data,
+        write_data=write_data,
+        cache_sizes=cache_sizes,
+        all_numjobs=all_numjobs,
     )
-    write_test_files = build_test_files(
-        'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\fio-l2p-cache-randwrite-4k-1G',
-        cache_sizes
-    )
 
-    # Parse read/write test files
-    read_data = parse_dataset(read_test_files, op_type='read')
-    write_data = parse_dataset(write_test_files, op_type='write')
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["rw", "num_jobs", "cache_size", "qd", "metric", "unit", "value"])
+        for r in rows:
+            writer.writerow([
+                r["rw"],
+                r["num_jobs"],
+                r["cache_size"],
+                r["qd"],
+                metric_key,
+                metric_unit,
+                f"{r['value']:.6f}",
+            ])
 
-    # Create figure with subplots
-    fig, axes = plt.subplots(8, 2, figsize=(12, 22))
-    fig.suptitle('FIO Performance Results - L2P Cache Size Impact', fontsize=16, fontweight='bold', y=0.985)
-    fig.text(
-        0.5,
-        0.96,
-        "Ubuntu 22.04.5 LTS x86_64, Kernel: 5.15.0-170-generic",
-        ha="center",
-        va="top",
-        fontsize=10,
-    )
-    fig.text(
-        0.5,
-        0.945,
-        "fio-3.28, ioengine=libaio, size=1G, block_size=4K",
-        ha="center",
-        va="top",
-        fontsize=10,
-    )
-    fig.text(
-        0.5,
-        0.93,
-        "CPU: Intel Core i7-14700KF@5.6GHz, RAM: 128GB",
-        ha="center",
-        va="top",
-        fontsize=10,
-    )
+    print(f"Saved: {csv_path}")
 
-    # Color palette for the cache sizes (last is DRAM)
-    colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0"]
 
-    # Left column: randread
-    plot_metric(axes[0, 0], read_data, cache_sizes, colors, 'bandwidth', 'Bandwidth (MiB/s)', 'Randread: Bandwidth vs Queue Depth')
-    plot_metric(axes[1, 0], read_data, cache_sizes, colors, 'iops', 'IOPS (K)', 'Randread: IOPS vs Queue Depth')
-    plot_metric(axes[2, 0], read_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randread: Avg Latency vs Queue Depth')
-    plot_metric(axes[3, 0], read_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randread: Min Latency vs Queue Depth')
-    plot_metric(axes[4, 0], read_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randread: Max Latency vs Queue Depth')
-    plot_metric(axes[5, 0], read_data, cache_sizes, colors, 'latency_p90', 'Latency (μs)', 'Randread: P90 Latency vs Queue Depth')
-    plot_metric(axes[6, 0], read_data, cache_sizes, colors, 'latency_p99', 'Latency (μs)', 'Randread: P99 Latency vs Queue Depth')
-    plot_metric(axes[7, 0], read_data, cache_sizes, colors, 'latency_p999', 'Latency (μs)', 'Randread: P99.9 Latency vs Queue Depth')
+def print_summary(op_name: str, dataset: Dict[str, Dict[str, List[dict]]], cache_sizes: List[str]) -> None:
+    print(f"\n{op_name} summary (best points over NUM_JOBS×QD):")
+    for cache in cache_sizes:
+        if cache not in dataset:
+            continue
+        points = dataset[cache]["points"]
+        best_bw = max(points, key=lambda x: x["bandwidth"])
+        best_iops = max(points, key=lambda x: x["iops"])
+        best_lat = min(points, key=lambda x: x["latency_avg"])
+        print(f"  [{cache}]")
+        print(
+            f"    Max BW:   {best_bw['bandwidth']:.2f} MiB/s "
+            f"(NUM_JOBS={best_bw['num_jobs']}, QD={best_bw['qd']})"
+        )
+        print(
+            f"    Max IOPS: {best_iops['iops']:.0f} "
+            f"(NUM_JOBS={best_iops['num_jobs']}, QD={best_iops['qd']})"
+        )
+        print(
+            f"    Min Avg Lat: {best_lat['latency_avg']:.2f} us "
+            f"(NUM_JOBS={best_lat['num_jobs']}, QD={best_lat['qd']})"
+        )
 
-    # Right column: randwrite
-    plot_metric(axes[0, 1], write_data, cache_sizes, colors, 'bandwidth', 'Bandwidth (MiB/s)', 'Randwrite: Bandwidth vs Queue Depth')
-    plot_metric(axes[1, 1], write_data, cache_sizes, colors, 'iops', 'IOPS (K)', 'Randwrite: IOPS vs Queue Depth')
-    plot_metric(axes[2, 1], write_data, cache_sizes, colors, 'latency_avg', 'Latency (μs)', 'Randwrite: Avg Latency vs Queue Depth')
-    plot_metric(axes[3, 1], write_data, cache_sizes, colors, 'latency_min', 'Latency (μs)', 'Randwrite: Min Latency vs Queue Depth')
-    plot_metric(axes[4, 1], write_data, cache_sizes, colors, 'latency_max', 'Latency (μs)', 'Randwrite: Max Latency vs Queue Depth')
-    plot_metric(axes[5, 1], write_data, cache_sizes, colors, 'latency_p90', 'Latency (μs)', 'Randwrite: P90 Latency vs Queue Depth')
-    plot_metric(axes[6, 1], write_data, cache_sizes, colors, 'latency_p99', 'Latency (μs)', 'Randwrite: P99 Latency vs Queue Depth')
-    plot_metric(axes[7, 1], write_data, cache_sizes, colors, 'latency_p999', 'Latency (μs)', 'Randwrite: P99.9 Latency vs Queue Depth')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
+def main() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    results_root = repo_root / "results"
+    read_dir = results_root / "fio-l2p-cache-randread-4k-1G"
+    write_dir = results_root / "fio-l2p-cache-randwrite-4k-1G"
 
-    # Save the figure
-    output_path = 'd:\\MiscProjects\\pku-ssd-write-buffer-graph\\scripts\\fio_performance_plot.png'
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"\nPlot saved to: {output_path}")
+    read_data = parse_dataset(read_dir, op_type="read")
+    write_data = parse_dataset(write_dir, op_type="write")
 
-    # Print summary statistics
-    print("\n" + "="*80)
-    print("Performance Summary:")
-    print("="*80)
-    for rw_label, dataset in [('Randread', read_data), ('Randwrite', write_data)]:
-        print(f"\n{rw_label}:")
-        for cache_size in cache_sizes:
-            if cache_size in dataset:
-                data = dataset[cache_size]
-                if cache_size == 'DRAM':
-                    print(f"\nDRAM (no HMB):")
-                else:
-                    print(f"\n{cache_size} HMB Cache:")
-                print(f"  Max Bandwidth:      {max(data['bandwidth']):.2f} MiB/s (at QD={data['qd'][data['bandwidth'].index(max(data['bandwidth']))]})")
-                print(f"  Max IOPS:           {max(data['iops']):.0f} (at QD={data['qd'][data['iops'].index(max(data['iops']))]})")
-                print(f"  Min Latency:        {min(data['latency_min']):.2f} μs (at QD={data['qd'][data['latency_min'].index(min(data['latency_min']))]})")
-                print(f"  Max Latency:        {max(data['latency_max']):.2f} μs (at QD={data['qd'][data['latency_max'].index(max(data['latency_max']))]})")
-                print(f"  Avg Latency (min):  {min(data['latency_avg']):.2f} μs (at QD={data['qd'][data['latency_avg'].index(min(data['latency_avg']))]})")
+    cache_sizes = sorted(set(read_data.keys()) | set(write_data.keys()), key=cache_sort_key)
+    if not cache_sizes:
+        print("No parsed data found. Please check results directory and log format.")
+        return
 
-    plt.show()
+    colors = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0", "#4c78a8", "#f58518"]
 
-if __name__ == '__main__':
+    all_numjobs = sorted(set(collect_numjobs(read_data)) | set(collect_numjobs(write_data)))
+    if not all_numjobs:
+        print("No NUM_JOBS sections found in parsed data.")
+        return
+
+    output_fig_dir = repo_root / "output-figures"
+    output_csv_dir = repo_root / "output-csv"
+    output_fig_dir.mkdir(parents=True, exist_ok=True)
+    output_csv_dir.mkdir(parents=True, exist_ok=True)
+
+    figure_specs = [
+        ("bandwidth", "Bandwidth (MiB/s)", "MiB/s", "FIO L2P Cache - Bandwidth (Per-NUM_JOBS)", "fio_l2p_cache_bandwidth_plot.png"),
+        ("iops", "IOPS (K)", "KIOPS", "FIO L2P Cache - IOPS (Per-NUM_JOBS)", "fio_l2p_cache_iops_plot.png"),
+        ("latency_p90", "Latency (us)", "us", "FIO L2P Cache - P90 Latency (Per-NUM_JOBS)", "fio_l2p_cache_p90lat_plot.png"),
+        ("latency_p99", "Latency (us)", "us", "FIO L2P Cache - P99 Latency (Per-NUM_JOBS)", "fio_l2p_cache_p99lat_plot.png"),
+        ("latency_avg", "Latency (us)", "us", "FIO L2P Cache - Avg Latency (Per-NUM_JOBS)", "fio_l2p_cache_avglat_plot.png"),
+    ]
+
+    print("\nGenerating figures...")
+    for metric_key, ylabel, metric_unit, title, filename in figure_specs:
+        png_path = output_fig_dir / filename
+        generate_metric_figure(
+            metric_key=metric_key,
+            ylabel=ylabel,
+            fig_title=title,
+            output_path=png_path,
+            read_data=read_data,
+            write_data=write_data,
+            cache_sizes=cache_sizes,
+            colors=colors,
+            all_numjobs=all_numjobs,
+        )
+        csv_path = output_csv_dir / f"{Path(filename).stem}.csv"
+        save_metric_csv(
+            csv_path=csv_path,
+            metric_key=metric_key,
+            metric_unit=metric_unit,
+            read_data=read_data,
+            write_data=write_data,
+            cache_sizes=cache_sizes,
+            all_numjobs=all_numjobs,
+        )
+
+    print("\n" + "=" * 80)
+    print("Performance Summary")
+    print("=" * 80)
+    print_summary("Randread", read_data, cache_sizes)
+    print_summary("Randwrite", write_data, cache_sizes)
+
+    print(f"\nAll figures are saved under: {output_fig_dir}")
+    print(f"All CSV files are saved under: {output_csv_dir}")
+
+
+if __name__ == "__main__":
     main()

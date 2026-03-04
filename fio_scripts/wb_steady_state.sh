@@ -11,7 +11,7 @@ TEST_SIZE="4G"           # 测试区域大小 (1G 到 5G，即 4GB)
 RUNTIME=60              # 测试运行时长 (秒)。想看稳态可能需要设长一点，比如 1200 (20分钟) 或更久
 BS="4k"                  # 块大小，测 IOPS 必须用 4k
 IODEPTH=128               # 队列深度
-RESULTS_DIR=~/exp_results
+RESULTS_DIR=/mnt/wsl-share/results/wb_steady_state  # 结果目录
 # ===========================================
 
 # 创建结果目录

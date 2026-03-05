@@ -1,16 +1,12 @@
 #!/bin/bash
 
-cd /usr/src/linux-source-5.15.0/drivers/nvme/host
-sudo rmmod nvme
-sudo insmod ./nvme.ko
-
 # ================= 配置区域 =================
 DEV="/dev/nvme0n1"       # ⚠️ 请再次确认设备名！
 OFFSET="1G"              # 起始偏移量
-TEST_SIZE="4G"           # 测试区域大小 (1G 到 5G，即 4GB)
-RUNTIME=60              # 测试运行时长 (秒)。想看稳态可能需要设长一点，比如 1200 (20分钟) 或更久
+TEST_SIZE="12G"           # 测试区域大小 (1G 到 5G，即 4GB)
+RUNTIME=30              # 测试运行时长 (秒)。想看稳态可能需要设长一点，比如 1200 (20分钟) 或更久
 BS="4k"                  # 块大小，测 IOPS 必须用 4k
-IODEPTH=128               # 队列深度
+IODEPTH=64               # 队列深度
 RESULTS_DIR=/mnt/wsl-share/results/wb_steady_state  # 结果目录
 # ===========================================
 
@@ -27,7 +23,7 @@ echo "设备: $DEV"
 echo "测试范围: Offset=$OFFSET, Size=$TEST_SIZE"
 echo "模式: 随机写入 (randwrite), 块大小=$BS"
 echo "时长: ${RUNTIME} 秒"
-echo "注意：为了看到 Steady State，脚本会在该 4GB 区域内反复覆盖写入。"
+echo "注意：为了看到 Steady State，脚本会在该区域内反复覆盖写入。"
 echo "================================"
 
 # ⚠️ 关键：确保测试前该区域是空的 (Trimmed)，这样才能测出 FOB 性能
@@ -52,7 +48,7 @@ sudo fio --name=ssd_steady_state \
     --runtime=$RUNTIME \
     --group_reporting \
     --write_iops_log=${LOG_PREFIX}_iops.log \
-    --log_avg_msec=500 \
+    --log_avg_msec=50 \
     --output-format=json+ | tee ${LOG_PREFIX}_result.json
 
 echo ""

@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+根据 fio --write_iops_log 输出绘制稳态散点图。
+
+数据来源：results/wb_steady_state/
+默认匹配：*_iops.log_iops.*.log*
+
+输出：
+- output-figures/fio_wb_steady_state_scatter.png
+- output-csv/fio_wb_steady_state_scatter.csv
+"""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+from statistics import median
+from typing import List, Tuple
+
+import matplotlib.pyplot as plt
+
+
+@dataclass
+class SteadyStateSeries:
+    scenario: str
+    source_file: Path
+    time_sec: List[float]
+    iops: List[float]
+
+
+def infer_scenario_name(path: Path) -> str:
+    name = path.name
+    if "-" in name:
+        return name.split("-")[-1]
+    return path.stem
+
+
+def parse_iops_log(path: Path) -> SteadyStateSeries:
+    t: List[float] = []
+    y: List[float] = []
+
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                t_ms = float(parts[0])
+                iops = float(parts[1])
+            except ValueError:
+                continue
+            t.append(t_ms / 1000.0)
+            y.append(iops)
+
+    return SteadyStateSeries(
+        scenario=infer_scenario_name(path),
+        source_file=path,
+        time_sec=t,
+        iops=y,
+    )
+
+
+def moving_average(values: List[float], window: int = 9) -> List[float]:
+    if not values:
+        return []
+    w = max(1, window)
+    out: List[float] = []
+    acc = 0.0
+    q: List[float] = []
+    for v in values:
+        q.append(v)
+        acc += v
+        if len(q) > w:
+            acc -= q.pop(0)
+        out.append(acc / len(q))
+    return out
+
+
+def steady_tail_slice(n: int, tail_ratio: float = 0.30, min_points: int = 20) -> slice:
+    if n <= 0:
+        return slice(0, 0)
+    tail_n = max(min_points, int(n * tail_ratio))
+    tail_n = min(n, tail_n)
+    return slice(n - tail_n, n)
+
+
+def summarize_tail(values: List[float], tail: slice) -> Tuple[float, float, float]:
+    tail_vals = values[tail]
+    if not tail_vals:
+        return 0.0, 0.0, 0.0
+    vals = sorted(tail_vals)
+    p10 = vals[max(0, int(0.10 * (len(vals) - 1)))]
+    p90 = vals[max(0, int(0.90 * (len(vals) - 1)))]
+    med = median(vals)
+    return p10, med, p90
+
+
+def save_csv(rows: List[Tuple[str, float, float, int]], csv_path: Path) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["scenario", "time_sec", "iops", "in_steady_tail"])
+        for r in rows:
+            writer.writerow([r[0], f"{r[1]:.3f}", f"{r[2]:.3f}", r[3]])
+
+
+def plot_steady_state_scatter(series_list: List[SteadyStateSeries], output_png: Path) -> None:
+    if not series_list:
+        print("No wb steady-state iops logs found.")
+        return
+
+    fig_h = max(4.0, 3.6 * len(series_list))
+    fig, axes = plt.subplots(len(series_list), 1, figsize=(11, fig_h), squeeze=False)
+    fig.suptitle("FIO Write Buffer Steady-State Scatter", fontsize=16, fontweight="bold", y=0.995)
+    # fig.text(0.5, 0.968, "Data source: results/wb_steady_state/*_iops.log_iops.*.log*", ha="center", va="top", fontsize=9)
+
+    colors = [
+        "#54A24B",
+        "#B279A2",
+        "#E45756",
+        "#4C78A8",
+        "#F58518",
+    ]
+
+    for idx, s in enumerate(series_list):
+        ax = axes[idx, 0]
+        c = colors[idx % len(colors)]
+
+        tail = steady_tail_slice(len(s.iops), tail_ratio=0.30, min_points=20)
+        p10, med, p90 = summarize_tail(s.iops, tail)
+        iops_ma = moving_average(s.iops, window=9)
+
+        ax.scatter(s.time_sec, s.iops, s=16, alpha=0.65, color=c, label=f"{s.scenario} points")
+        ax.plot(s.time_sec, iops_ma, color="black", linewidth=1.6, alpha=0.9, label="moving avg (window=9)")
+
+        if tail.start is not None and tail.start < len(s.time_sec):
+            steady_begin_t = s.time_sec[tail.start]
+            steady_end_t = s.time_sec[-1]
+            ax.axvspan(steady_begin_t, steady_end_t, color="#d9d9d9", alpha=0.25, label="steady-tail window")
+
+        if med > 0:
+            ax.axhline(med, color="#2ca02c", linestyle="--", linewidth=1.5, label=f"tail median={med:.0f}")
+            ax.axhline(p10, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
+            ax.axhline(p90, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
+
+        ax.set_title(f"{s.scenario}  ({s.source_file.name})", fontsize=11)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("IOPS")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+
+        print(
+            f"[{s.scenario}] points={len(s.iops)}, "
+            f"tail-median={med:.0f}, tail-p10={p10:.0f}, tail-p90={p90:.0f}"
+        )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {output_png}")
+
+
+def main() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    data_dir = repo_root / "results" / "wb_steady_state"
+
+    log_files = sorted(data_dir.glob("*_iops.log_iops.*.log*"))
+    if not log_files:
+        print(f"No matched files under: {data_dir}")
+        return
+
+    series_list = [parse_iops_log(p) for p in log_files]
+    series_list = [s for s in series_list if s.time_sec and s.iops]
+    if not series_list:
+        print("No valid datapoints parsed from iops logs.")
+        return
+
+    output_png = repo_root / "output-figures" / "fio_wb_steady_state_scatter.png"
+    output_csv = repo_root / "output-csv" / "fio_wb_steady_state_scatter.csv"
+
+    rows: List[Tuple[str, float, float, int]] = []
+    for s in series_list:
+        tail = steady_tail_slice(len(s.iops), tail_ratio=0.30, min_points=20)
+        for i, (t, y) in enumerate(zip(s.time_sec, s.iops)):
+            in_tail = 1 if (tail.start is not None and i >= tail.start) else 0
+            rows.append((s.scenario, t, y, in_tail))
+
+    save_csv(rows, output_csv)
+    print(f"Saved: {output_csv}")
+
+    plot_steady_state_scatter(series_list, output_png)
+
+
+if __name__ == "__main__":
+    main()

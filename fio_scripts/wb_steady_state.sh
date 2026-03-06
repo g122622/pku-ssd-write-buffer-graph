@@ -45,7 +45,7 @@ sudo fio --name=ssd_steady_state \
     --direct=1 \
     --ioengine=libaio \
     --iodepth=$IODEPTH \
-    --numjobs=1 \
+    --numjobs=4 \
     --time_based \
     --runtime=$RUNTIME \
     --group_reporting \

@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 
@@ -24,7 +25,7 @@ import matplotlib.pyplot as plt
 @dataclass
 class SteadyStateSeries:
     scenario: str
-    source_file: Path
+    source_name: str
     time_sec: List[float]
     iops: List[float]
 
@@ -36,7 +37,34 @@ def infer_scenario_name(path: Path) -> str:
     return path.stem
 
 
-def parse_iops_log(path: Path) -> SteadyStateSeries:
+def infer_scenario_name_from_group_key(group_key: str) -> str:
+    # 优先使用类似 *.log-WB_Disabled 这种后缀作为场景名
+    if ".log-" in group_key:
+        return group_key.split(".log-")[-1]
+    # 无后缀时，使用测试前缀
+    if "_iops.log_iops" in group_key:
+        return group_key.split("_iops.log_iops")[0]
+    return group_key
+
+
+def split_sharded_iops_log_name(name: str) -> Tuple[str, int] | None:
+    """
+    识别 fio iops shard 文件名：
+    - ssd_test_xxx_iops.log_iops.1.log
+    - ssd_test_xxx_iops.log_iops.1.log-WB_Disabled
+    返回：("公共前缀+尾部标签", shard_index)
+    """
+    m = re.match(r"^(.*_iops\.log_iops)\.(\d+)\.log(.*)$", name)
+    if not m:
+        return None
+    prefix = m.group(1)
+    shard_index = int(m.group(2))
+    tail = m.group(3)
+    group_key = f"{prefix}{tail}"
+    return group_key, shard_index
+
+
+def read_iops_points(path: Path) -> Tuple[List[float], List[float]]:
     t: List[float] = []
     y: List[float] = []
 
@@ -56,12 +84,81 @@ def parse_iops_log(path: Path) -> SteadyStateSeries:
             t.append(t_ms / 1000.0)
             y.append(iops)
 
+    return t, y
+
+
+def parse_iops_log(path: Path) -> SteadyStateSeries:
+    t, y = read_iops_points(path)
+
     return SteadyStateSeries(
         scenario=infer_scenario_name(path),
-        source_file=path,
+        source_name=path.name,
         time_sec=t,
         iops=y,
     )
+
+
+def merge_sharded_iops_logs(group_key: str, files: List[Path]) -> SteadyStateSeries:
+    parsed = [read_iops_points(p) for p in files]
+    parsed = [(t, y) for t, y in parsed if t and y]
+    if not parsed:
+        return SteadyStateSeries(
+            scenario=infer_scenario_name_from_group_key(group_key),
+            source_name=f"{group_key} (merged {len(files)} logs)",
+            time_sec=[],
+            iops=[],
+        )
+
+    base_t, base_y = parsed[0]
+    sum_iops = list(base_y)
+
+    for t, y in parsed[1:]:
+        n = min(len(base_t), len(sum_iops), len(t), len(y))
+        if n <= 0:
+            base_t = []
+            sum_iops = []
+            break
+
+        # 采样点如果长度不一致，按最短长度对齐
+        if len(t) != len(base_t):
+            print(f"Warning: shard length mismatch for {group_key}, aligned to {n} points")
+
+        # 时间轴若有微小偏差，按索引对齐（用户数据采样一致）
+        for i in range(n):
+            sum_iops[i] += y[i]
+
+        base_t = base_t[:n]
+        sum_iops = sum_iops[:n]
+
+    return SteadyStateSeries(
+        scenario=infer_scenario_name_from_group_key(group_key),
+        source_name=f"{group_key} (sum of {len(files)} shards)",
+        time_sec=base_t,
+        iops=sum_iops,
+    )
+
+
+def build_series_from_files(log_files: List[Path]) -> List[SteadyStateSeries]:
+    grouped: Dict[str, List[Tuple[int, Path]]] = {}
+
+    for p in log_files:
+        split = split_sharded_iops_log_name(p.name)
+        if split is None:
+            grouped.setdefault(p.name, []).append((1, p))
+            continue
+        group_key, shard_idx = split
+        grouped.setdefault(group_key, []).append((shard_idx, p))
+
+    out: List[SteadyStateSeries] = []
+    for group_key in sorted(grouped.keys()):
+        shard_items = sorted(grouped[group_key], key=lambda x: x[0])
+        files = [p for _, p in shard_items]
+        if len(files) == 1:
+            out.append(parse_iops_log(files[0]))
+        else:
+            out.append(merge_sharded_iops_logs(group_key, files))
+
+    return out
 
 
 def moving_average(values: List[float], window: int = 9) -> List[float]:
@@ -147,7 +244,7 @@ def plot_steady_state_scatter(series_list: List[SteadyStateSeries], output_png: 
             ax.axhline(p10, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
             ax.axhline(p90, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
 
-        ax.set_title(f"{s.scenario}  ({s.source_file.name})", fontsize=11)
+        ax.set_title(f"{s.scenario}  ({s.source_name})", fontsize=11)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("IOPS")
         ax.grid(True, alpha=0.3)
@@ -174,7 +271,7 @@ def main() -> None:
         print(f"No matched files under: {data_dir}")
         return
 
-    series_list = [parse_iops_log(p) for p in log_files]
+    series_list = build_series_from_files(log_files)
     series_list = [s for s in series_list if s.time_sec and s.iops]
     if not series_list:
         print("No valid datapoints parsed from iops logs.")

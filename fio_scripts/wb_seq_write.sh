@@ -1,16 +1,12 @@
 #!/bin/bash
 
-cd /usr/src/linux-source-5.15.0/drivers/nvme/host
-sudo rmmod nvme
-sudo insmod ./nvme.ko
-
 # ================= 配置区域 =================
 DEV="/dev/nvme0n1"       # ⚠️ 请再次确认设备名！
 OFFSET="1G"             # 起始偏移量，保护分区表
-MAX_SIZE=192            # 测试的最大容量 (MB)
+MAX_SIZE=512            # 测试的最大容量 (MB)
 STEP=8                  # 步长
 BS="1M"                 # 单次 IO 块大小 (测试带宽建议 1M)
-RESULTS_DIR=~/exp_results
+RESULTS_DIR=/mnt/wsl-share/results/wb_seq_write  # 结果目录
 # ===========================================
 
 # 创建结果目录

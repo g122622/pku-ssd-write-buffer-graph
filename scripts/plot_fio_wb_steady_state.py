@@ -32,6 +32,8 @@ class SteadyStateSeries:
 
 def infer_scenario_name(path: Path) -> str:
     name = path.name
+    if ".log-" in name:
+        return name.split(".log-", 1)[1]
     if "-" in name:
         return name.split("-")[-1]
     return path.stem
@@ -40,7 +42,10 @@ def infer_scenario_name(path: Path) -> str:
 def infer_scenario_name_from_group_key(group_key: str) -> str:
     # 优先使用类似 *.log-WB_Disabled 这种后缀作为场景名
     if ".log-" in group_key:
-        return group_key.split(".log-")[-1]
+        return group_key.split(".log-", 1)[1]
+    marker = "_iops.log_iops-"
+    if marker in group_key:
+        return group_key.split(marker, 1)[1]
     # 无后缀时，使用测试前缀
     if "_iops.log_iops" in group_key:
         return group_key.split("_iops.log_iops")[0]
@@ -244,7 +249,10 @@ def plot_steady_state_scatter(series_list: List[SteadyStateSeries], output_png: 
             ax.axhline(p10, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
             ax.axhline(p90, color="#2ca02c", linestyle=":", linewidth=1.2, alpha=0.8)
 
-        ax.set_title(f"{s.scenario}  ({s.source_name})", fontsize=11)
+        if s.scenario.startswith("Job"):
+            ax.set_title(s.scenario, fontsize=11)
+        else:
+            ax.set_title(f"{s.scenario}  ({s.source_name})", fontsize=11)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("IOPS")
         ax.grid(True, alpha=0.3)

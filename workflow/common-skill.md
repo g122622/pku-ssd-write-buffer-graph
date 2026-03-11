@@ -112,10 +112,10 @@ cd /home/g122622/dev/FEMU/build-femu/run-blackbox.sh
 
 ```
  # 登录虚拟机
-  sshpass -p '123456' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 8080 g122622@localhost
+  sshpass -p '123456' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 8081 g122622@localhost
 
 # 执行远程命令
-  sshpass -p '123456' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 8080 g122622@localhost '命令'
+  sshpass -p '123456' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 8081 g122622@localhost '命令'
 ```
 
 ## 3.3 执行命令

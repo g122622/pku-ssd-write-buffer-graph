@@ -25,17 +25,17 @@ sudo fio --name=pre --filename=$DEV --offset=$OFFSET --size=$SIZE \
     --group_reporting | tee -a $LOG_FILE
 
 echo "=== 开始 NUM_JOBS 扫描测试 ===" | tee -a $LOG_FILE
-for NUM_JOBS in 1 2 4 8 16 32 64; do
+for NUM_JOBS in 1 4 8 16 64; do
     echo "========== Testing NUM_JOBS=$NUM_JOBS ==========" | tee -a $LOG_FILE
     
     echo "=== 开始 QD 扫描测试 ===" | tee -a $LOG_FILE
-    for qd in 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 ; do
+    for qd in 1 2 4 8 16 24 40 56 72 88 96 112 128 ; do
         echo "--- Testing QD=$qd ---" | tee -a $LOG_FILE
         
         sudo fio --name=test_nj${NUM_JOBS}_qd$qd --filename=$DEV --offset=$OFFSET --size=$SIZE \
             --direct=1 --rw=randwrite --bs=4k \
             --ioengine=libaio --iodepth=$qd \
-            --numjobs=$NUM_JOBS --time_based --runtime=3 \
+            --numjobs=$NUM_JOBS --time_based --runtime=10 \
             --group_reporting | tee -a $LOG_FILE
         
         echo "" | tee -a $LOG_FILE

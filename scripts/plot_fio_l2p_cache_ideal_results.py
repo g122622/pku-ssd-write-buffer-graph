@@ -20,9 +20,13 @@ guest 内 fio 实际可见的 performance envelope：
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import math
+import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -81,6 +85,21 @@ WRITE_GC_STRENGTH_BASE = 0.28
 WRITE_GC_STRENGTH_EXP = 0.65
 WRITE_GC_PRESSURE_EXP = 1.2
 
+DEFAULT_NOISE_RATIO = 0.03
+DEFAULT_NOISE_SEED = 20260312
+DEFAULT_NOISE_MODE = "uniform"
+
+
+@dataclass(frozen=True)
+class NoiseConfig:
+    ratio: float = DEFAULT_NOISE_RATIO
+    seed: int = DEFAULT_NOISE_SEED
+    mode: str = DEFAULT_NOISE_MODE
+
+    @property
+    def enabled(self) -> bool:
+        return self.ratio > 0.0
+
 
 def calc_iops(num_jobs, qd, l1_size, l2_size, is_write):
     return _calc_model(num_jobs, qd, l1_size, l2_size, is_write)[0]
@@ -113,6 +132,72 @@ def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
     corrected_lat_us = K * 1_000_000.0 / corrected_iops
     corrected_lat_us = max(corrected_lat_us, visible_floor_lat_us)
     return corrected_iops, corrected_lat_us
+
+
+def _build_point_rng(
+    noise_config: NoiseConfig,
+    *,
+    is_write: bool,
+    num_jobs: int,
+    qd: int,
+    l1_size: int,
+    l2_size: int,
+) -> random.Random:
+    point_key = (
+        f"seed={noise_config.seed}|rw={'write' if is_write else 'read'}|"
+        f"nj={num_jobs}|qd={qd}|l1={l1_size}|l2={l2_size}"
+    )
+    digest = hashlib.sha256(point_key.encode("utf-8")).digest()
+    return random.Random(int.from_bytes(digest[:8], "big"))
+
+
+def _sample_noise_factor(rng: random.Random, noise_config: NoiseConfig) -> float:
+    if not noise_config.enabled:
+        return 1.0
+
+    if noise_config.mode == "gaussian":
+        sigma = noise_config.ratio / 2.0
+        jitter = rng.gauss(0.0, sigma)
+    else:
+        jitter = rng.uniform(-noise_config.ratio, noise_config.ratio)
+
+    factor = 1.0 + jitter
+    min_factor = max(0.05, 1.0 - noise_config.ratio)
+    max_factor = 1.0 + noise_config.ratio
+    return min(max(factor, min_factor), max_factor)
+
+
+def _apply_noise_to_metrics(
+    iops: float,
+    avg_lat_us: float,
+    *,
+    noise_config: NoiseConfig,
+    is_write: bool,
+    num_jobs: int,
+    qd: int,
+    l1_size: int,
+    l2_size: int,
+) -> Tuple[float, float]:
+    if not noise_config.enabled:
+        return iops, avg_lat_us
+
+    rng = _build_point_rng(
+        noise_config,
+        is_write=is_write,
+        num_jobs=num_jobs,
+        qd=qd,
+        l1_size=l1_size,
+        l2_size=l2_size,
+    )
+    performance_factor = _sample_noise_factor(rng, noise_config)
+    latency_residual = rng.uniform(-noise_config.ratio / 3.0, noise_config.ratio / 3.0)
+
+    adjusted_iops = max(1.0, iops * performance_factor)
+    adjusted_lat_us = max(
+        1e-6,
+        avg_lat_us / performance_factor * (1.0 + latency_residual),
+    )
+    return adjusted_iops, adjusted_lat_us
 
 
 def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
@@ -288,7 +373,9 @@ def cache_sort_key(label: str) -> Tuple[int, str]:
     return (value * scale, label)
 
 
-def build_theoretical_dataset(is_write: bool) -> Dict[str, Dict[str, List[dict]]]:
+def build_theoretical_dataset(
+    is_write: bool, noise_config: NoiseConfig
+) -> Dict[str, Dict[str, List[dict]]]:
     qd_sweep = WRITE_QD_SWEEP if is_write else READ_QD_SWEEP
     dataset: Dict[str, Dict[str, List[dict]]] = {}
 
@@ -303,6 +390,16 @@ def build_theoretical_dataset(is_write: bool) -> Dict[str, Dict[str, List[dict]]
                     l1_size=L1_SIZE_KB,
                     l2_size=l2_size_kb,
                     is_write=is_write,
+                )
+                iops, avg_lat_us = _apply_noise_to_metrics(
+                    iops,
+                    avg_lat_us,
+                    noise_config=noise_config,
+                    is_write=is_write,
+                    num_jobs=num_jobs,
+                    qd=qd,
+                    l1_size=L1_SIZE_KB,
+                    l2_size=l2_size_kb,
                 )
                 points.append(
                     {
@@ -365,6 +462,7 @@ def generate_metric_figure(
     cache_sizes: List[str],
     colors: List[str],
     all_numjobs: List[int],
+    noise_config: NoiseConfig,
 ) -> None:
     fig, axes = plt.subplots(
         len(all_numjobs), 2, figsize=(9, 3.2 * len(all_numjobs)), squeeze=False
@@ -390,6 +488,17 @@ def generate_metric_figure(
         0.5,
         0.951,
         "Read uses per-job/front-end cap; Write adds heuristic GC/front-end penalty; bs=4k size=1G WB disabled",
+        ha="center",
+        va="top",
+        fontsize=9,
+    )
+    fig.text(
+        0.5,
+        0.939,
+        (
+            "Random perturbation: "
+            f"{'disabled' if not noise_config.enabled else f'{noise_config.mode} ±{noise_config.ratio:.1%}, seed={noise_config.seed}'}"
+        ),
         ha="center",
         va="top",
         fontsize=9,
@@ -429,10 +538,48 @@ def generate_metric_figure(
             bbox_to_anchor=(0.5, 0.942),
         )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.tight_layout(rect=[0, 0, 1, 0.91])
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {output_path}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Plot corrected theoretical L2P cache results with optional random perturbation."
+    )
+    parser.add_argument(
+        "--noise-ratio",
+        type=float,
+        default=DEFAULT_NOISE_RATIO,
+        help=(
+            "Relative random perturbation strength for each point. "
+            "0 disables noise, 0.03 means about ±3%%."
+        ),
+    )
+    parser.add_argument(
+        "--noise-seed",
+        type=int,
+        default=DEFAULT_NOISE_SEED,
+        help="Seed used to generate reproducible per-point perturbations.",
+    )
+    parser.add_argument(
+        "--noise-mode",
+        choices=("uniform", "gaussian"),
+        default=DEFAULT_NOISE_MODE,
+        help="Distribution used for the perturbation.",
+    )
+    return parser.parse_args()
+
+
+def build_noise_config(args: argparse.Namespace) -> NoiseConfig:
+    if args.noise_ratio < 0.0:
+        raise ValueError("--noise-ratio must be non-negative")
+    return NoiseConfig(
+        ratio=float(args.noise_ratio),
+        seed=int(args.noise_seed),
+        mode=str(args.noise_mode),
+    )
 
 
 def build_clean_plot_rows(
@@ -532,14 +679,17 @@ def print_summary(
 
 
 def main() -> None:
+    args = parse_args()
+    noise_config = build_noise_config(args)
+
     repo_root = Path(__file__).resolve().parents[1]
     output_fig_dir = repo_root / "output-figures"
     output_csv_dir = repo_root / "output-csv"
     output_fig_dir.mkdir(parents=True, exist_ok=True)
     output_csv_dir.mkdir(parents=True, exist_ok=True)
 
-    read_data = build_theoretical_dataset(is_write=False)
-    write_data = build_theoretical_dataset(is_write=True)
+    read_data = build_theoretical_dataset(is_write=False, noise_config=noise_config)
+    write_data = build_theoretical_dataset(is_write=True, noise_config=noise_config)
     cache_sizes = sorted(
         set(read_data.keys()) | set(write_data.keys()), key=cache_sort_key
     )
@@ -562,7 +712,10 @@ def main() -> None:
         ),
     ]
 
-    print("Generating theoretical figures...")
+    print(
+        "Generating theoretical figures "
+        f"(noise={'off' if not noise_config.enabled else f'{noise_config.mode} ±{noise_config.ratio:.1%}, seed={noise_config.seed}'})..."
+    )
     for metric_key, ylabel, metric_unit, title, filename in figure_specs:
         png_path = output_fig_dir / filename
         generate_metric_figure(
@@ -575,6 +728,7 @@ def main() -> None:
             cache_sizes=cache_sizes,
             colors=COLORS,
             all_numjobs=all_numjobs,
+            noise_config=noise_config,
         )
         csv_path = output_csv_dir / f"{Path(filename).stem}.csv"
         save_metric_csv(

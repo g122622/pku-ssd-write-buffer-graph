@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 READ_QD_SWEEP = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
 WRITE_QD_SWEEP = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]
 NUM_JOBS_SWEEP = [1, 2, 4, 8, 16, 32, 64]
-L1_SIZE_KB = 0
+L1_SIZE_KB = 256
 L2_CACHE_SIZES_KB = [512, 1024, 1536, 2048]
 COLORS = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0", "#4c78a8", "#f58518"]
 

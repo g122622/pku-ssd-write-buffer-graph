@@ -7,13 +7,21 @@ FIO L2P Cache Theoretical Results Plotter
 2) 横轴 QD 取值直接对齐实验脚本。
 3) 输出理论 IOPS / Avg Lat 图与对应 CSV。
 
-当前理论模型仅显式建模 L2P cache 命中对 IOPS 和平均延迟的影响，
-因此这里固定 L1=0KB，只扫描实验中实际使用的 L2 档位。
+修正后的理论模型分两层：
+1) FEMU 设备侧模型：保留 BBSSD + multilevel-L2P 的 closed-network MVA；
+2) Host-visible 修正：加入此前实验和日志中确认的 guest front-end 瓶颈。
+
+它不再把结果解释为“纯 device-side upper bound”，而是更接近
+guest 内 fio 实际可见的 performance envelope：
+- READ: 设备时延稳定，但会被 per-job issue/reap 与 guest 前端吞吐上限截断；
+- WRITE: 在前述基础上，再叠加一个与 QD/L2 容量相关的经验 GC 惩罚项，
+    用于近似实验里观察到的高 QD 下写性能回落。
 """
 
 from __future__ import annotations
 
 import csv
+import math
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -22,11 +30,56 @@ import matplotlib.pyplot as plt
 
 
 READ_QD_SWEEP = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
-WRITE_QD_SWEEP = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]
+WRITE_QD_SWEEP = [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    40,
+    48,
+    56,
+    64,
+    72,
+    80,
+    88,
+    96,
+    104,
+    112,
+    120,
+    128,
+]
 NUM_JOBS_SWEEP = [1, 2, 4, 8, 16, 32, 64]
 L1_SIZE_KB = 256
 L2_CACHE_SIZES_KB = [512, 1024, 1536, 2048]
 COLORS = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0", "#4c78a8", "#f58518"]
+
+VM_VCPUS = 16
+
+READ_HOST_FIXED_US = 7.8
+WRITE_HOST_FIXED_US = 7.0
+
+READ_FRONTEND_BASE_IOPS = 118_000.0
+READ_FRONTEND_NUMJOBS_ALPHA = 0.44
+READ_FRONTEND_VCPU_ALPHA = 0.90
+READ_FRONTEND_QD_KNEE = 5.0
+
+WRITE_FRONTEND_BASE_BY_L2_KB = {
+    512: 70_000.0,
+    1024: 78_000.0,
+    1536: 86_000.0,
+    2048: 94_000.0,
+}
+WRITE_FRONTEND_NUMJOBS_ALPHA = 0.22
+WRITE_FRONTEND_VCPU_ALPHA = 0.35
+WRITE_FRONTEND_QD_KNEE = 18.0
+WRITE_GC_QD_KNEE_BASE = 44.0
+WRITE_GC_QD_KNEE_PER_KB = 1.0 / 24.0
+WRITE_GC_STRENGTH_BASE = 0.28
+WRITE_GC_STRENGTH_EXP = 0.65
+WRITE_GC_PRESSURE_EXP = 1.2
 
 
 def calc_iops(num_jobs, qd, l1_size, l2_size, is_write):
@@ -38,8 +91,33 @@ def calc_avg_lat(num_jobs, qd, l1_size, l2_size, is_write):
 
 
 def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
+    device_iops, device_lat_us = _calc_device_model(
+        num_jobs=num_jobs,
+        qd=qd,
+        l1_size=l1_size,
+        l2_size=l2_size,
+        is_write=is_write,
+    )
+
+    K = int(num_jobs) * int(qd)
+    host_fixed_us = WRITE_HOST_FIXED_US if is_write else READ_HOST_FIXED_US
+    visible_floor_lat_us = device_lat_us + host_fixed_us
+    visible_floor_iops = K * 1_000_000.0 / visible_floor_lat_us
+
+    if is_write:
+        frontend_cap_iops = _calc_write_frontend_cap_iops(num_jobs, qd, l2_size)
+    else:
+        frontend_cap_iops = _calc_read_frontend_cap_iops(num_jobs, qd)
+
+    corrected_iops = min(device_iops, visible_floor_iops, frontend_cap_iops)
+    corrected_lat_us = K * 1_000_000.0 / corrected_iops
+    corrected_lat_us = max(corrected_lat_us, visible_floor_lat_us)
+    return corrected_iops, corrected_lat_us
+
+
+def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
     """
-    FEMU BBSSD theoretical model for the given fixed configuration:
+    FEMU BBSSD device-side model for the given fixed configuration:
 
     - secsz = 512
     - secs_per_pg = 8           => data page size = 4 KiB
@@ -69,12 +147,9 @@ def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
     Returns:
         (iops, avg_lat_us)
 
-    Notes:
-    - For the read workload in your fio script, this matches the FEMU device-side
-      timing model closely.
-    - For writes, this models the same code path but intentionally does NOT add
-      GC-state-dependent extra cost, because GC depends on prior workload history
-      and cannot be inferred from this stateless function signature.
+        Notes:
+        - This helper only describes the device-side service model.
+        - Host-visible corrections are added by `_calc_model()` on top of it.
     """
     if num_jobs <= 0 or qd <= 0:
         raise ValueError("num_jobs and qd must be positive")
@@ -144,6 +219,32 @@ def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
     )
 
     return iops_per_us * 1_000_000.0, avg_lat_us
+
+
+def _calc_read_frontend_cap_iops(num_jobs: int, qd: int) -> float:
+    asymptotic_cap = (
+        READ_FRONTEND_BASE_IOPS
+        * (float(num_jobs) ** READ_FRONTEND_NUMJOBS_ALPHA)
+        * ((VM_VCPUS / 16.0) ** READ_FRONTEND_VCPU_ALPHA)
+    )
+    qd_ramp = 1.0 - math.exp(-float(qd) / READ_FRONTEND_QD_KNEE)
+    return max(1.0, asymptotic_cap * qd_ramp)
+
+
+def _calc_write_frontend_cap_iops(num_jobs: int, qd: int, l2_size: int) -> float:
+    base_cap = WRITE_FRONTEND_BASE_BY_L2_KB.get(l2_size, 70_000.0)
+    qd_ramp = 1.0 - math.exp(-float(qd) / WRITE_FRONTEND_QD_KNEE)
+    job_penalty = float(num_jobs) ** WRITE_FRONTEND_NUMJOBS_ALPHA
+    vcpu_scale = (VM_VCPUS / 16.0) ** WRITE_FRONTEND_VCPU_ALPHA
+
+    qd_gc_knee = WRITE_GC_QD_KNEE_BASE + l2_size * WRITE_GC_QD_KNEE_PER_KB
+    pressure = max(float(qd) - qd_gc_knee, 0.0) / qd_gc_knee
+    gc_strength = WRITE_GC_STRENGTH_BASE * (
+        (2048.0 / float(l2_size)) ** WRITE_GC_STRENGTH_EXP
+    )
+    gc_penalty = 1.0 + gc_strength * (pressure**WRITE_GC_PRESSURE_EXP)
+
+    return max(1.0, base_cap * qd_ramp * vcpu_scale / (job_penalty * gc_penalty))
 
 
 def _closed_network_mva(population, think_us, service_demands_us, servers):
@@ -216,7 +317,9 @@ def build_theoretical_dataset(is_write: bool) -> Dict[str, Dict[str, List[dict]]
     return dataset
 
 
-def extract_qd_metric_for_numjobs(points: List[dict], target_numjobs: int, metric_key: str) -> Tuple[List[int], List[float]]:
+def extract_qd_metric_for_numjobs(
+    points: List[dict], target_numjobs: int, metric_key: str
+) -> Tuple[List[int], List[float]]:
     subset = [p for p in points if p["num_jobs"] == target_numjobs]
     subset.sort(key=lambda x: x["qd"])
     qd = [p["qd"] for p in subset]
@@ -239,7 +342,9 @@ def plot_numjobs_panel(
     for idx, cache_size in enumerate(cache_sizes):
         if cache_size not in all_data:
             continue
-        qd, y = extract_qd_metric_for_numjobs(all_data[cache_size]["points"], target_numjobs, metric_key)
+        qd, y = extract_qd_metric_for_numjobs(
+            all_data[cache_size]["points"], target_numjobs, metric_key
+        )
         if not qd:
             continue
         ax.plot(qd, y, color=colors[idx % len(colors)], label=cache_size, linewidth=2)
@@ -261,11 +366,34 @@ def generate_metric_figure(
     colors: List[str],
     all_numjobs: List[int],
 ) -> None:
-    fig, axes = plt.subplots(len(all_numjobs), 2, figsize=(9, 3.2 * len(all_numjobs)), squeeze=False)
+    fig, axes = plt.subplots(
+        len(all_numjobs), 2, figsize=(9, 3.2 * len(all_numjobs)), squeeze=False
+    )
     fig.suptitle(fig_title, fontsize=16, fontweight="bold", y=0.995)
-    fig.text(0.5, 0.975, "Theoretical model: FEMU BBSSD closed-network MVA", ha="center", va="top", fontsize=9)
-    fig.text(0.5, 0.963, "L1 cache fixed to 0KB; L2 scan follows experiment settings", ha="center", va="top", fontsize=9)
-    fig.text(0.5, 0.951, "Workload: fio randread/randwrite, bs=4k, size=1G, WB disabled", ha="center", va="top", fontsize=9)
+    fig.text(
+        0.5,
+        0.975,
+        "Corrected model: FEMU device MVA + guest front-end bottleneck correction",
+        ha="center",
+        va="top",
+        fontsize=9,
+    )
+    fig.text(
+        0.5,
+        0.963,
+        f"L1 fixed to {L1_SIZE_KB}KB; L2 scan follows experiment; assumed VM vCPU={VM_VCPUS}",
+        ha="center",
+        va="top",
+        fontsize=9,
+    )
+    fig.text(
+        0.5,
+        0.951,
+        "Read uses per-job/front-end cap; Write adds heuristic GC/front-end penalty; bs=4k size=1G WB disabled",
+        ha="center",
+        va="top",
+        fontsize=9,
+    )
 
     for row, nj in enumerate(all_numjobs):
         plot_numjobs_panel(
@@ -340,7 +468,9 @@ def build_clean_plot_rows(
     collect_rows("randread", read_data)
     collect_rows("randwrite", write_data)
 
-    rows.sort(key=lambda r: (r["rw"], r["num_jobs"], cache_sort_key(r["cache_size"]), r["qd"]))
+    rows.sort(
+        key=lambda r: (r["rw"], r["num_jobs"], cache_sort_key(r["cache_size"]), r["qd"])
+    )
     return rows
 
 
@@ -363,22 +493,28 @@ def save_metric_csv(
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["rw", "num_jobs", "cache_size", "qd", "metric", "unit", "value"])
+        writer.writerow(
+            ["rw", "num_jobs", "cache_size", "qd", "metric", "unit", "value"]
+        )
         for r in rows:
-            writer.writerow([
-                r["rw"],
-                r["num_jobs"],
-                r["cache_size"],
-                r["qd"],
-                metric_key,
-                metric_unit,
-                f"{r['value']:.6f}",
-            ])
+            writer.writerow(
+                [
+                    r["rw"],
+                    r["num_jobs"],
+                    r["cache_size"],
+                    r["qd"],
+                    metric_key,
+                    metric_unit,
+                    f"{r['value']:.6f}",
+                ]
+            )
 
     print(f"Saved: {csv_path}")
 
 
-def print_summary(op_name: str, dataset: Dict[str, Dict[str, List[dict]]], cache_sizes: List[str]) -> None:
+def print_summary(
+    op_name: str, dataset: Dict[str, Dict[str, List[dict]]], cache_sizes: List[str]
+) -> None:
     print(f"\n{op_name} theoretical summary (best points over NUM_JOBS×QD):")
     for cache in cache_sizes:
         points = dataset[cache]["points"]
@@ -404,7 +540,9 @@ def main() -> None:
 
     read_data = build_theoretical_dataset(is_write=False)
     write_data = build_theoretical_dataset(is_write=True)
-    cache_sizes = sorted(set(read_data.keys()) | set(write_data.keys()), key=cache_sort_key)
+    cache_sizes = sorted(
+        set(read_data.keys()) | set(write_data.keys()), key=cache_sort_key
+    )
     all_numjobs = NUM_JOBS_SWEEP[:]
 
     figure_specs = [

@@ -1,0 +1,112 @@
+=== 测试开始于 Wed Mar 18 08:04:08 UTC 2026 ===
+=== 测试配置 ===
+DEV: /dev/nvme0n1
+OFFSET: 1G
+SIZE: 1G
+IO Engine: io_uring
+日志文件：/mnt/wsl-share/results/fio-l2p-cache-randwrite-4k-1G/fio_uring_test_20260318_080408.log
+================================
+=== 开始预填充 (Pre-conditioning) ===
+pre: (g=0): rw=write, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=64
+fio-3.28
+Starting 1 process
+
+pre: (groupid=0, jobs=1): err= 0: pid=1545: Wed Mar 18 08:04:54 2026
+  write: IOPS=5729, BW=22.4MiB/s (23.5MB/s)(1024MiB/45755msec); 0 zone resets
+    slat (nsec): min=738, max=4158.0k, avg=12061.90, stdev=19626.24
+    clat (usec): min=233, max=37031, avg=11157.17, stdev=3463.35
+     lat (usec): min=394, max=37051, avg=11169.40, stdev=3464.04
+    clat percentiles (usec):
+     |  1.00th=[  766],  5.00th=[ 2737], 10.00th=[ 5276], 20.00th=[10552],
+     | 30.00th=[12387], 40.00th=[12387], 50.00th=[12518], 60.00th=[12518],
+     | 70.00th=[12518], 80.00th=[12518], 90.00th=[12518], 95.00th=[12649],
+     | 99.00th=[23987], 99.50th=[24249], 99.90th=[24249], 99.95th=[24249],
+     | 99.99th=[26870]
+   bw (  KiB/s): min=22624, max=23216, per=100.00%, avg=22946.67, stdev=219.63, samples=91
+   iops        : min= 5656, max= 5804, avg=5736.62, stdev=54.94, samples=91
+  lat (usec)   : 250=0.01%, 500=0.55%, 750=0.41%, 1000=0.67%
+  lat (msec)   : 2=1.93%, 4=3.82%, 10=11.72%, 20=79.63%, 50=1.27%
+  cpu          : usr=1.89%, sys=10.96%, ctx=241415, majf=0, minf=11
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.1%, >=64=0.0%
+     issued rwts: total=0,262144,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=64
+
+Run status group 0 (all jobs):
+  WRITE: bw=22.4MiB/s (23.5MB/s), 22.4MiB/s-22.4MiB/s (23.5MB/s-23.5MB/s), io=1024MiB (1074MB), run=45755-45755msec
+
+Disk stats (read/write):
+  nvme0n1: ios=99/261567, merge=0/0, ticks=2/2916464, in_queue=2916466, util=99.96%
+=== 开始 T1Q64 与 T64Q1 对比测试 ===
+========== Testing T1Q64 (numjobs=1, iodepth=64) ==========
+test_T1Q64: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=64
+fio-3.28
+Starting 1 process
+
+test_T1Q64: (groupid=0, jobs=1): err= 0: pid=2056: Wed Mar 18 08:05:04 2026
+  write: IOPS=91.3k, BW=357MiB/s (374MB/s)(3566MiB/10001msec); 0 zone resets
+    slat (nsec): min=520, max=1566.4k, avg=10013.21, stdev=8613.20
+    clat (usec): min=209, max=14001, avg=690.55, stdev=270.18
+     lat (usec): min=393, max=14008, avg=700.67, stdev=270.41
+    clat percentiles (usec):
+     |  1.00th=[  416],  5.00th=[  461], 10.00th=[  486], 20.00th=[  523],
+     | 30.00th=[  562], 40.00th=[  594], 50.00th=[  635], 60.00th=[  685],
+     | 70.00th=[  734], 80.00th=[  816], 90.00th=[  938], 95.00th=[ 1057],
+     | 99.00th=[ 1467], 99.50th=[ 1909], 99.90th=[ 3785], 99.95th=[ 4817],
+     | 99.99th=[ 7046]
+   bw (  KiB/s): min=329357, max=378696, per=100.00%, avg=365316.84, stdev=14284.94, samples=19
+   iops        : min=82339, max=94674, avg=91329.16, stdev=3571.30, samples=19
+  lat (usec)   : 250=0.01%, 500=13.29%, 750=58.71%, 1000=21.08%
+  lat (msec)   : 2=6.47%, 4=0.37%, 10=0.08%, 20=0.01%
+  cpu          : usr=6.72%, sys=91.30%, ctx=6768, majf=0, minf=9
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.1%, >=64=0.0%
+     issued rwts: total=0,912910,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=64
+
+Run status group 0 (all jobs):
+  WRITE: bw=357MiB/s (374MB/s), 357MiB/s-357MiB/s (374MB/s-374MB/s), io=3566MiB (3739MB), run=10001-10001msec
+
+Disk stats (read/write):
+  nvme0n1: ios=51/903312, merge=0/0, ticks=1/506077, in_queue=506078, util=99.24%
+
+========== Testing T64Q1 (numjobs=64, iodepth=1) ==========
+test_T64Q1: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=1
+...
+fio-3.28
+Starting 64 processes
+
+test_T64Q1: (groupid=0, jobs=64): err= 0: pid=2073: Wed Mar 18 08:05:14 2026
+  write: IOPS=65.1k, BW=254MiB/s (267MB/s)(2546MiB/10005msec); 0 zone resets
+    slat (nsec): min=1061, max=18006k, avg=69768.89, stdev=199699.32
+    clat (nsec): min=139, max=37932k, avg=884700.69, stdev=837919.93
+     lat (usec): min=395, max=37954, avg=957.09, stdev=856.27
+    clat percentiles (usec):
+     |  1.00th=[  225],  5.00th=[  396], 10.00th=[  424], 20.00th=[  486],
+     | 30.00th=[  553], 40.00th=[  611], 50.00th=[  676], 60.00th=[  758],
+     | 70.00th=[  865], 80.00th=[ 1037], 90.00th=[ 1450], 95.00th=[ 2114],
+     | 99.00th=[ 4293], 99.50th=[ 5800], 99.90th=[ 8094], 99.95th=[ 9372],
+     | 99.99th=[23725]
+   bw (  KiB/s): min=219004, max=286803, per=100.00%, avg=262218.79, stdev=241.50, samples=1216
+   iops        : min=54742, max=71672, avg=65531.89, stdev=60.27, samples=1216
+  lat (nsec)   : 250=0.12%, 500=0.36%, 750=0.10%, 1000=0.02%
+  lat (usec)   : 2=0.02%, 4=0.02%, 10=0.03%, 20=0.02%, 50=0.02%
+  lat (usec)   : 100=0.04%, 250=0.35%, 500=21.13%, 750=37.16%, 1000=18.89%
+  lat (msec)   : 2=16.08%, 4=4.46%, 10=1.14%, 20=0.02%, 50=0.02%
+  cpu          : usr=6.44%, sys=8.98%, ctx=652958, majf=0, minf=973
+  IO depths    : 1=100.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,651736,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+
+Run status group 0 (all jobs):
+  WRITE: bw=254MiB/s (267MB/s), 254MiB/s-254MiB/s (267MB/s-267MB/s), io=2546MiB (2670MB), run=10005-10005msec
+
+Disk stats (read/write):
+  nvme0n1: ios=51/643042, merge=0/0, ticks=2/435113, in_queue=435114, util=98.86%
+
+=== 测试完成于 Wed Mar 18 08:05:15 UTC 2026 ===
+所有结果已保存到：/mnt/wsl-share/results/fio-l2p-cache-randwrite-4k-1G/fio_uring_test_20260318_080408.log

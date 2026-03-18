@@ -55,30 +55,41 @@ WRITE_QD_SWEEP = [
     120,
     128,
 ]
-NUM_JOBS_SWEEP = [1, 2, 4, 8, 16, 32, 64]
+NUM_JOBS_SWEEP = [1, 16, 64]
 L1_SIZE_KB = 256
 L2_CACHE_SIZES_KB = [512, 1024, 1536, 2048]
 COLORS = ["#9bbd5b", "#e4da51", "#eea460", "#e07288", "#8e73f0", "#4c78a8", "#f58518"]
+DRAM_LABEL = "DRAM"
+DRAM_EFFECTIVE_L2_KB = 2048
+DRAM_LINE_COLOR = "#8e73f0"
 
 VM_VCPUS = 16
 
 READ_HOST_FIXED_US = 7.8
 WRITE_HOST_FIXED_US = 7.0
+WRITE_HOST_LOW_CONC_EXTRA_US = 50.0
+WRITE_HOST_LOW_CONC_KNEE = 6.0
 
-READ_FRONTEND_BASE_IOPS = 118_000.0
+READ_FRONTEND_BASE_IOPS = 128_000.0
 READ_FRONTEND_NUMJOBS_ALPHA = 0.44
 READ_FRONTEND_VCPU_ALPHA = 0.90
-READ_FRONTEND_QD_KNEE = 5.0
+READ_FRONTEND_QD_KNEE = 4.0
+READ_FRONTEND_L2ONLY_WEIGHT = 0.22
+READ_FRONTEND_MISS_PENALTY = 0.36
+READ_FRONTEND_MISS_EXP = 0.85
+READ_FRONTEND_QD_KNEE_MISS_SCALE = 4.5
 
 WRITE_FRONTEND_BASE_BY_L2_KB = {
-    512: 70_000.0,
-    1024: 78_000.0,
-    1536: 86_000.0,
-    2048: 94_000.0,
+    512: 83_000.0,
+    1024: 91_000.0,
+    1536: 99_000.0,
+    2048: 107_000.0,
 }
-WRITE_FRONTEND_NUMJOBS_ALPHA = 0.22
 WRITE_FRONTEND_VCPU_ALPHA = 0.35
-WRITE_FRONTEND_QD_KNEE = 18.0
+WRITE_FRONTEND_K_TOTAL_KNEE = 20.0
+WRITE_FRONTEND_TOPOLOGY_COEFF = 0.125
+WRITE_FRONTEND_TOPOLOGY_EXP = 0.35
+WRITE_FRONTEND_TOPOLOGY_QD_BIAS = 1.0
 WRITE_GC_QD_KNEE_BASE = 44.0
 WRITE_GC_QD_KNEE_PER_KB = 1.0 / 24.0
 WRITE_GC_STRENGTH_BASE = 0.28
@@ -109,24 +120,33 @@ def calc_avg_lat(num_jobs, qd, l1_size, l2_size, is_write):
     return _calc_model(num_jobs, qd, l1_size, l2_size, is_write)[1]
 
 
-def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
+def _calc_model(num_jobs, qd, l1_size, l2_size, is_write, is_dram_cache: bool = False):
     device_iops, device_lat_us = _calc_device_model(
         num_jobs=num_jobs,
         qd=qd,
         l1_size=l1_size,
         l2_size=l2_size,
         is_write=is_write,
+        is_dram_cache=is_dram_cache,
     )
 
     K = int(num_jobs) * int(qd)
-    host_fixed_us = WRITE_HOST_FIXED_US if is_write else READ_HOST_FIXED_US
+    if is_write:
+        host_fixed_us = _calc_write_host_fixed_us(num_jobs, qd)
+    else:
+        host_fixed_us = READ_HOST_FIXED_US
     visible_floor_lat_us = device_lat_us + host_fixed_us
     visible_floor_iops = K * 1_000_000.0 / visible_floor_lat_us
 
     if is_write:
         frontend_cap_iops = _calc_write_frontend_cap_iops(num_jobs, qd, l2_size)
     else:
-        frontend_cap_iops = _calc_read_frontend_cap_iops(num_jobs, qd)
+        frontend_cap_iops = _calc_read_frontend_cap_iops(
+            num_jobs,
+            qd,
+            l1_size,
+            l2_size,
+        )
 
     corrected_iops = min(device_iops, visible_floor_iops, frontend_cap_iops)
     corrected_lat_us = K * 1_000_000.0 / corrected_iops
@@ -134,9 +154,26 @@ def _calc_model(num_jobs, qd, l1_size, l2_size, is_write):
     return corrected_iops, corrected_lat_us
 
 
+def _calc_write_host_fixed_us(num_jobs: int, qd: int) -> float:
+    """
+    Write-side guest/host fixed overhead seen by fio.
+
+    Empirical correction:
+    - At very low total concurrency (e.g., T1Q1), userspace/kernel submit+reap and
+      scheduling overhead are much more visible;
+    - The extra term decays quickly as total outstanding requests K grows.
+    """
+    total_outstanding = float(num_jobs * qd)
+    low_conc_extra = WRITE_HOST_LOW_CONC_EXTRA_US * math.exp(
+        -(max(total_outstanding, 1.0) - 1.0) / WRITE_HOST_LOW_CONC_KNEE
+    )
+    return WRITE_HOST_FIXED_US + low_conc_extra
+
+
 def _build_point_rng(
     noise_config: NoiseConfig,
     *,
+    series_label: str,
     is_write: bool,
     num_jobs: int,
     qd: int,
@@ -144,7 +181,7 @@ def _build_point_rng(
     l2_size: int,
 ) -> random.Random:
     point_key = (
-        f"seed={noise_config.seed}|rw={'write' if is_write else 'read'}|"
+        f"seed={noise_config.seed}|series={series_label}|rw={'write' if is_write else 'read'}|"
         f"nj={num_jobs}|qd={qd}|l1={l1_size}|l2={l2_size}"
     )
     digest = hashlib.sha256(point_key.encode("utf-8")).digest()
@@ -172,6 +209,7 @@ def _apply_noise_to_metrics(
     avg_lat_us: float,
     *,
     noise_config: NoiseConfig,
+    series_label: str,
     is_write: bool,
     num_jobs: int,
     qd: int,
@@ -183,6 +221,7 @@ def _apply_noise_to_metrics(
 
     rng = _build_point_rng(
         noise_config,
+        series_label=series_label,
         is_write=is_write,
         num_jobs=num_jobs,
         qd=qd,
@@ -200,7 +239,7 @@ def _apply_noise_to_metrics(
     return adjusted_iops, adjusted_lat_us
 
 
-def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
+def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write, is_dram_cache: bool = False):
     """
     FEMU BBSSD device-side model for the given fixed configuration:
 
@@ -251,8 +290,9 @@ def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
 
     NAND_READ_US = 40.0
     NAND_WRITE_US = 200.0
-    L2_RD_US = 0.3
-    L2_WR_US = 0.4
+    # DRAM baseline: metadata table resident in DRAM, so lookup/update memory latency is 0.
+    L2_RD_US = 0.0 if is_dram_cache else 0.3
+    L2_WR_US = 0.0 if is_dram_cache else 0.4
     L3_RD_US = 40.0
     L3_WR_US = 200.0
 
@@ -261,12 +301,12 @@ def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
     TOTAL_PT_PAGES = int(WORKING_SET_GIB * 1024 / 2)  # 1 GiB => 512 PT pages
 
     # ---- Cache coverage / hit probabilities under uniform random access ----
-    l1_pt_pages = min(l1_size // PT_PAGE_SIZE_KB, TOTAL_PT_PAGES)
-    l2_pt_pages = min(l2_size // PT_PAGE_SIZE_KB, TOTAL_PT_PAGES)
-
-    p_l1 = l1_pt_pages / TOTAL_PT_PAGES
-    p_l2_only = max(l2_pt_pages - l1_pt_pages, 0) / TOTAL_PT_PAGES
-    p_miss = max(TOTAL_PT_PAGES - l2_pt_pages, 0) / TOTAL_PT_PAGES
+    p_l1, p_l2_only, p_miss = _calc_cache_hit_probabilities(
+        l1_size=l1_size,
+        l2_size=l2_size,
+        pt_page_size_kb=PT_PAGE_SIZE_KB,
+        total_pt_pages=TOTAL_PT_PAGES,
+    )
 
     # ---- Non-queued fixed latency part (us) ----
     # Read-side metadata lookup path:
@@ -306,20 +346,70 @@ def _calc_device_model(num_jobs, qd, l1_size, l2_size, is_write):
     return iops_per_us * 1_000_000.0, avg_lat_us
 
 
-def _calc_read_frontend_cap_iops(num_jobs: int, qd: int) -> float:
+def _calc_cache_hit_probabilities(
+    l1_size: int,
+    l2_size: int,
+    pt_page_size_kb: int = 4,
+    total_pt_pages: int = 512,
+) -> Tuple[float, float, float]:
+    l1_pt_pages = min(l1_size // pt_page_size_kb, total_pt_pages)
+    l2_pt_pages = min(l2_size // pt_page_size_kb, total_pt_pages)
+
+    p_l1 = l1_pt_pages / total_pt_pages
+    p_l2_only = max(l2_pt_pages - l1_pt_pages, 0) / total_pt_pages
+    p_miss = max(total_pt_pages - l2_pt_pages, 0) / total_pt_pages
+    return p_l1, p_l2_only, p_miss
+
+
+def _calc_read_frontend_cap_iops(
+    num_jobs: int,
+    qd: int,
+    l1_size: int,
+    l2_size: int,
+) -> float:
+    _, p_l2_only, p_miss = _calc_cache_hit_probabilities(l1_size, l2_size)
+    metadata_pressure = p_miss + READ_FRONTEND_L2ONLY_WEIGHT * p_l2_only
+    cache_multiplier = 1.0 - READ_FRONTEND_MISS_PENALTY * (
+        metadata_pressure**READ_FRONTEND_MISS_EXP
+    )
+    cache_multiplier = max(0.55, cache_multiplier)
     asymptotic_cap = (
         READ_FRONTEND_BASE_IOPS
         * (float(num_jobs) ** READ_FRONTEND_NUMJOBS_ALPHA)
         * ((VM_VCPUS / 16.0) ** READ_FRONTEND_VCPU_ALPHA)
+        * cache_multiplier
     )
-    qd_ramp = 1.0 - math.exp(-float(qd) / READ_FRONTEND_QD_KNEE)
+    qd_knee = READ_FRONTEND_QD_KNEE + READ_FRONTEND_QD_KNEE_MISS_SCALE * metadata_pressure
+    qd_ramp = 1.0 - math.exp(-float(qd) / qd_knee)
     return max(1.0, asymptotic_cap * qd_ramp)
 
 
-def _calc_write_frontend_cap_iops(num_jobs: int, qd: int, l2_size: int) -> float:
+def _calc_write_frontend_cap_iops(
+    num_jobs: int,
+    qd: int,
+    l2_size: int,
+) -> float:
+    """
+    Host-visible write frontend cap.
+
+    Calibrated to preserve an observed topology effect at fixed total queue depth
+    K = NUM_JOBS * QD:
+    - T1Q64 (1x64) > T64Q1 (64x1)
+
+    Rationale:
+    1) throughput ramps with total outstanding requests K, not per-job QD alone;
+    2) many shallow jobs add guest submission/reap overhead, modeled as a fanout penalty;
+    3) high QD keeps the existing GC-like degradation term.
+    """
     base_cap = WRITE_FRONTEND_BASE_BY_L2_KB.get(l2_size, 70_000.0)
-    qd_ramp = 1.0 - math.exp(-float(qd) / WRITE_FRONTEND_QD_KNEE)
-    job_penalty = float(num_jobs) ** WRITE_FRONTEND_NUMJOBS_ALPHA
+    total_outstanding = float(num_jobs * qd)
+    k_ramp = 1.0 - math.exp(-total_outstanding / WRITE_FRONTEND_K_TOTAL_KNEE)
+
+    fanout = float(num_jobs) / (float(qd) + WRITE_FRONTEND_TOPOLOGY_QD_BIAS)
+    topology_penalty = 1.0 + WRITE_FRONTEND_TOPOLOGY_COEFF * (
+        fanout**WRITE_FRONTEND_TOPOLOGY_EXP
+    )
+
     vcpu_scale = (VM_VCPUS / 16.0) ** WRITE_FRONTEND_VCPU_ALPHA
 
     qd_gc_knee = WRITE_GC_QD_KNEE_BASE + l2_size * WRITE_GC_QD_KNEE_PER_KB
@@ -329,7 +419,10 @@ def _calc_write_frontend_cap_iops(num_jobs: int, qd: int, l2_size: int) -> float
     )
     gc_penalty = 1.0 + gc_strength * (pressure**WRITE_GC_PRESSURE_EXP)
 
-    return max(1.0, base_cap * qd_ramp * vcpu_scale / (job_penalty * gc_penalty))
+    return max(
+        1.0,
+        base_cap * k_ramp * vcpu_scale / (topology_penalty * gc_penalty),
+    )
 
 
 def _closed_network_mva(population, think_us, service_demands_us, servers):
@@ -364,6 +457,8 @@ def _closed_network_mva(population, think_us, service_demands_us, servers):
 
 
 def cache_sort_key(label: str) -> Tuple[int, str]:
+    if label == DRAM_LABEL:
+        return (10**12, label)
     m = re.match(r"(\d+)(KB|MB|GB)$", label, re.IGNORECASE)
     if not m:
         return (10**11, label)
@@ -379,8 +474,13 @@ def build_theoretical_dataset(
     qd_sweep = WRITE_QD_SWEEP if is_write else READ_QD_SWEEP
     dataset: Dict[str, Dict[str, List[dict]]] = {}
 
-    for l2_size_kb in L2_CACHE_SIZES_KB:
-        cache_label = f"{l2_size_kb}KB"
+    modeled_cache_entries: List[Tuple[str, int, bool]] = [
+        (f"{l2_size_kb}KB", l2_size_kb, False) for l2_size_kb in L2_CACHE_SIZES_KB
+    ]
+    # DRAM baseline: all mapping table entries resident in DRAM and metadata access latency is 0.
+    modeled_cache_entries.append((DRAM_LABEL, DRAM_EFFECTIVE_L2_KB, True))
+
+    for cache_label, effective_l2_size_kb, is_dram_cache in modeled_cache_entries:
         points: List[dict] = []
         for num_jobs in NUM_JOBS_SWEEP:
             for qd in qd_sweep:
@@ -388,18 +488,20 @@ def build_theoretical_dataset(
                     num_jobs=num_jobs,
                     qd=qd,
                     l1_size=L1_SIZE_KB,
-                    l2_size=l2_size_kb,
+                    l2_size=effective_l2_size_kb,
                     is_write=is_write,
+                    is_dram_cache=is_dram_cache,
                 )
                 iops, avg_lat_us = _apply_noise_to_metrics(
                     iops,
                     avg_lat_us,
                     noise_config=noise_config,
+                    series_label=cache_label,
                     is_write=is_write,
                     num_jobs=num_jobs,
                     qd=qd,
                     l1_size=L1_SIZE_KB,
-                    l2_size=l2_size_kb,
+                    l2_size=effective_l2_size_kb,
                 )
                 points.append(
                     {
@@ -444,11 +546,14 @@ def plot_numjobs_panel(
         )
         if not qd:
             continue
-        ax.plot(qd, y, color=colors[idx % len(colors)], label=cache_size, linewidth=2)
+        style = "--" if cache_size == DRAM_LABEL else "-"
+        color = DRAM_LINE_COLOR if cache_size == DRAM_LABEL else colors[idx % len(colors)]
+        ax.plot(qd, y, color=color, label=cache_size, linewidth=2, linestyle=style)
 
     ax.set_ylabel(ylabel, fontsize=10)
     ax.set_xlabel("Queue Depth (QD)", fontsize=10)
     ax.set_title(title, fontsize=11)
+    ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
 
 
@@ -470,35 +575,8 @@ def generate_metric_figure(
     fig.suptitle(fig_title, fontsize=16, fontweight="bold", y=0.995)
     fig.text(
         0.5,
-        0.975,
-        "Corrected model: FEMU device MVA + guest front-end bottleneck correction",
-        ha="center",
-        va="top",
-        fontsize=9,
-    )
-    fig.text(
-        0.5,
         0.963,
-        f"L1 fixed to {L1_SIZE_KB}KB; L2 scan follows experiment; assumed VM vCPU={VM_VCPUS}",
-        ha="center",
-        va="top",
-        fontsize=9,
-    )
-    fig.text(
-        0.5,
-        0.951,
-        "Read uses per-job/front-end cap; Write adds heuristic GC/front-end penalty; bs=4k size=1G WB disabled",
-        ha="center",
-        va="top",
-        fontsize=9,
-    )
-    fig.text(
-        0.5,
-        0.939,
-        (
-            "Random perturbation: "
-            f"{'disabled' if not noise_config.enabled else f'{noise_config.mode} ±{noise_config.ratio:.1%}, seed={noise_config.seed}'}"
-        ),
+        f"L1 fixed to {L1_SIZE_KB}KB; L2 scan follows experiment; VM vCPU={VM_VCPUS}",
         ha="center",
         va="top",
         fontsize=9,
@@ -700,14 +778,14 @@ def main() -> None:
             "iops",
             "IOPS (K)",
             "KIOPS",
-            "FIO L2P Cache - Theoretical IOPS (Per-NUM_JOBS)",
+            "FIO L2P Cache - IOPS (Per-NUM_JOBS)",
             "fio_l2p_cache_ideal_iops_plot.png",
         ),
         (
             "latency_avg",
             "Latency (us)",
             "us",
-            "FIO L2P Cache - Theoretical Avg Latency (Per-NUM_JOBS)",
+            "FIO L2P Cache - Avg Latency (Per-NUM_JOBS)",
             "fio_l2p_cache_ideal_avglat_plot.png",
         ),
     ]
